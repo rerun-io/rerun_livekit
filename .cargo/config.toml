@@ -1,0 +1,16 @@
+# Linker flags that LiveKit's prebuilt libwebrtc needs, copied from
+# https://github.com/livekit/rust-sdks/blob/main/.cargo/config.toml
+
+# Without `-ObjC`, the Objective-C categories in libwebrtc's static lib are not loaded
+# and the process aborts at startup.
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "link-args=-ObjC"]
+rustdocflags = ["-C", "link-args=-ObjC"]
+
+[target.x86_64-apple-darwin]
+rustflags = ["-C", "link-args=-ObjC"]
+rustdocflags = ["-C", "link-args=-ObjC"]
+
+# libwebrtc.a only links with lld on aarch64 Linux.
+[target.aarch64-unknown-linux-gnu]
+rustflags = ["-C", "link-arg=-fuse-ld=lld"]

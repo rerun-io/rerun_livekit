@@ -1,0 +1,525 @@
+//! The robot side: reads a Rerun stream from a proxy and publishes it to the room.
+
+use std::collections::VecDeque;
+use std::convert::Infallible;
+use std::path::PathBuf;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use anyhow::Context as _;
+use bytes::Bytes;
+use futures_util::FutureExt as _;
+use livekit::SendByteOptions;
+use livekit::prelude::*;
+use prost::Message as _;
+use re_protos::log_msg::v1alpha1::LogMsg;
+use re_protos::log_msg::v1alpha1::log_msg::Msg;
+use re_protos::sdk_comms::v1alpha1::ReadMessagesRequest;
+use rerun::external::re_uri::ProxyUri;
+use tokio::sync::mpsc;
+
+use crate::classify::{Retention, Route, StreamKey, classify};
+use crate::room::{LATEST_TRACK, LOG_TOPIC, LatestFrame, Role, RoomArgs};
+use crate::rules::Rules;
+use crate::video::{Sent, TRACK_INFO_TOPIC, VideoCodecArg, VideoPublisher};
+
+/// The largest message the latest lane can carry.
+///
+/// LiveKit's receiver gives up on a data track frame after 128 packets of at most 16 kB
+/// (the depacketizer and packetizer of `livekit-datatrack` 0.2.5).
+const MAX_LATEST_BYTES: usize = 1_900_000;
+
+/// The most messages to route before looking at anything else, so that an app that never
+/// pauses cannot keep the bridge from serving the room.
+const MAX_BURST_MESSAGES: usize = 256;
+
+/// How often to report what was dropped and to remove idle video tracks.
+const REPORT_INTERVAL: Duration = Duration::from_secs(10);
+
+#[derive(Clone, Debug, clap::Args)]
+pub struct RobotArgs {
+    /// Rerun proxy to read the stream from: a viewer, or `rerun --serve-grpc`.
+    #[arg(long, default_value = "rerun+http://127.0.0.1:9876/proxy")]
+    proxy: ProxyUri,
+
+    /// TOML file with rules for what to send and how. Without it, everything is sent.
+    #[arg(long)]
+    rules: Option<PathBuf>,
+
+    /// Drop latest-wins data older than this, in milliseconds.
+    #[arg(long, default_value_t = 1000)]
+    max_age_millis: u64,
+
+    /// Codec of the video tracks that carry images.
+    #[arg(long, value_enum, default_value_t = VideoCodecArg::H264)]
+    video_codec: VideoCodecArg,
+
+    /// Most bits per second a video track may use. The link's congestion control lowers it.
+    #[arg(long, default_value_t = 4_000_000)]
+    video_max_bitrate_bps: u64,
+
+    /// How much static data to keep for operators who join later, in bytes.
+    #[arg(long, default_value_t = 256 * 1024 * 1024)]
+    replay_limit_bytes: usize,
+
+    #[command(flatten)]
+    room: RoomArgs,
+}
+
+/// Runs one session, which lasts until the proxy or the room goes away.
+///
+/// # Errors
+/// Always, with what ended the session.
+pub async fn run_session(args: &RobotArgs) -> anyhow::Result<Infallible> {
+    let rules = match &args.rules {
+        Some(path) => Rules::load(path)?,
+        None => Rules::default(),
+    };
+    let (room, events) = args.room.connect(Role::Robot).await?;
+    let result = forward(args, &rules, &room, events).await;
+    room.close().await.ok();
+    result
+}
+
+async fn forward(
+    args: &RobotArgs,
+    rules: &Rules,
+    room: &Room,
+    mut events: mpsc::UnboundedReceiver<RoomEvent>,
+) -> anyhow::Result<Infallible> {
+    let mut log_msgs = crate::proxy::connect(&args.proxy)
+        .await?
+        .read_messages(ReadMessagesRequest {})
+        .await
+        .context("Failed to subscribe to the Rerun proxy")?
+        .into_inner();
+    log::info!("Forwarding {} to the room", args.proxy);
+
+    let local = room.local_participant();
+    // Unbounded on purpose: guaranteed messages are never dropped, and waiting here would
+    // make the proxy stall the app that is logging.
+    let (guaranteed_tx, guaranteed_rx) = mpsc::unbounded_channel();
+    let mut sender = tokio::spawn(send_guaranteed(local.clone(), guaranteed_rx));
+    let latest_track = local
+        .publish_data_track(LATEST_TRACK)
+        .await
+        .context("Failed to publish the data track")?;
+    let mut router = Router {
+        rules,
+        gate: Gate::new(Duration::from_millis(args.max_age_millis)),
+        latest: LatestLane::new(latest_track),
+        video: VideoPublisher::new(local, args.video_codec.into(), args.video_max_bitrate_bps),
+        replay: ReplayCache::new(args.replay_limit_bytes),
+        guaranteed_tx,
+    };
+    let mut report = tokio::time::interval(REPORT_INTERVAL);
+
+    loop {
+        tokio::select! {
+            response = log_msgs.message() => {
+                // An app logs in bursts. Route everything that has arrived, then send the
+                // latest-wins part of it as one frame.
+                let mut next = Some(response);
+                let mut num_routed = 0;
+                while let Some(response) = next.take() {
+                    let log_msg = response
+                        .context("Lost the Rerun proxy")?
+                        .context("The Rerun proxy closed the stream")?
+                        .log_msg
+                        .context("The Rerun proxy sent an empty message")?;
+                    router.route(log_msg).await?;
+                    num_routed += 1;
+                    if num_routed < MAX_BURST_MESSAGES {
+                        next = log_msgs.message().now_or_never();
+                    }
+                }
+                router.latest.flush();
+            }
+
+            event = events.recv() => match event.context("The room closed")? {
+                RoomEvent::ParticipantActive(participant)
+                    if Role::of(&participant) == Some(Role::Operator) =>
+                {
+                    router.replay_to(&participant.identity());
+                }
+                RoomEvent::Disconnected { reason } => {
+                    anyhow::bail!("Disconnected from the room: {reason:?}");
+                }
+                _ => {}
+            },
+
+            _ = report.tick() => {
+                router.gate.report_and_reset();
+                router.latest.report_and_reset();
+                router.video.unpublish_idle().await?;
+            }
+
+            result = &mut sender => {
+                result.context("The send task panicked")??;
+                anyhow::bail!("The send task stopped");
+            }
+        }
+    }
+}
+
+/// Sends each message from the proxy down the lane it belongs on.
+struct Router<'a> {
+    rules: &'a Rules,
+    gate: Gate,
+    latest: LatestLane,
+    video: VideoPublisher,
+    replay: ReplayCache,
+    guaranteed_tx: mpsc::UnboundedSender<Guaranteed>,
+}
+
+impl Router<'_> {
+    async fn route(&mut self, log_msg: LogMsg) -> anyhow::Result<()> {
+        let age = chunk_age(&log_msg);
+        let encode = || Bytes::from(log_msg.encode_to_vec());
+
+        // A chunk that cannot be read cannot be routed, so it travels as it is.
+        let route = classify(&log_msg, self.rules).unwrap_or_else(|err| {
+            log::warn!("Forwarding a message without looking inside: {err:#}");
+            Route::Guaranteed(Retention::None)
+        });
+        match route {
+            Route::Guaranteed(retention) => {
+                self.queue_guaranteed(retention, LOG_TOPIC, encode());
+            }
+            Route::Latest { stream, max_hz } => {
+                if self.gate.admits(&stream, max_hz, age) {
+                    self.latest.send(&stream, encode());
+                }
+            }
+            Route::Video {
+                stream,
+                max_hz,
+                store_id,
+                chunk,
+            } => {
+                if self.gate.admits(&stream, max_hz, age) {
+                    match self.video.send(&stream, &store_id, &chunk).await? {
+                        Sent::Video {
+                            new_track: Some(info),
+                        } => {
+                            self.queue_guaranteed(Retention::Persistent, TRACK_INFO_TOPIC, info);
+                        }
+                        Sent::Video { new_track: None } => {}
+                        Sent::Unsupported => self.latest.send(&stream, encode()),
+                    }
+                }
+            }
+            Route::Drop => {}
+        }
+        Ok(())
+    }
+
+    fn queue_guaranteed(&mut self, retention: Retention, topic: &'static str, bytes: Bytes) {
+        let message = ByteStreamMessage { topic, bytes };
+        self.replay.insert(retention, &message);
+        let destination = None;
+        self.guaranteed_tx
+            .send(Guaranteed {
+                message,
+                destination,
+            })
+            .ok();
+    }
+
+    /// Sends a participant who just joined what it needs to catch up.
+    fn replay_to(&self, identity: &ParticipantIdentity) {
+        log::info!("Replaying {} messages to {identity}", self.replay.len());
+        for message in self.replay.iter() {
+            let destination = Some(identity.clone());
+            self.guaranteed_tx
+                .send(Guaranteed {
+                    message,
+                    destination,
+                })
+                .ok();
+        }
+    }
+}
+
+/// How long ago the SDK created the chunk in `log_msg`.
+///
+/// `None` if the message has no chunk id or the clocks disagree, in which case it is not stale.
+fn chunk_age(log_msg: &LogMsg) -> Option<Duration> {
+    let Some(Msg::ArrowMsg(arrow_msg)) = &log_msg.msg else {
+        return None;
+    };
+    let created_nanos = arrow_msg.chunk_id.as_ref()?.time_ns?;
+    let created = UNIX_EPOCH + Duration::from_nanos(created_nanos);
+    SystemTime::now().duration_since(created).ok()
+}
+
+// ----------------------------------------------------------------------------
+
+/// An encoded message and the byte stream topic that says what it is.
+#[derive(Clone)]
+struct ByteStreamMessage {
+    topic: &'static str,
+    bytes: Bytes,
+}
+
+/// A message that must arrive, in order.
+struct Guaranteed {
+    message: ByteStreamMessage,
+
+    /// `None` sends to everyone in the room.
+    destination: Option<ParticipantIdentity>,
+}
+
+async fn send_guaranteed(
+    local: LocalParticipant,
+    mut guaranteed_rx: mpsc::UnboundedReceiver<Guaranteed>,
+) -> anyhow::Result<()> {
+    while let Some(Guaranteed {
+        message,
+        destination,
+    }) = guaranteed_rx.recv().await
+    {
+        let ByteStreamMessage { topic, bytes } = message;
+        // Rerun already compresses chunks where that helps.
+        let mut options = SendByteOptions::new_with_topic(topic).with_compress(false);
+        if let Some(destination) = destination {
+            options = options.with_destination_identity(destination);
+        }
+        local
+            .send_bytes(&bytes, options)
+            .await
+            .context("Failed to send a message to the room")?;
+    }
+    Ok(())
+}
+
+// ----------------------------------------------------------------------------
+
+/// Decides which latest-wins messages, data and video frames alike, are worth sending.
+struct Gate {
+    max_age: Duration,
+    last_sent: ahash::HashMap<StreamKey, Instant>,
+    num_stale: u64,
+    num_rate_limited: u64,
+}
+
+impl Gate {
+    fn new(max_age: Duration) -> Self {
+        Self {
+            max_age,
+            last_sent: Default::default(),
+            num_stale: 0,
+            num_rate_limited: 0,
+        }
+    }
+
+    /// Whether a message of `stream` that is `age` old is recent enough and within `max_hz`.
+    fn admits(&mut self, stream: &StreamKey, max_hz: Option<f64>, age: Option<Duration>) -> bool {
+        if age.is_some_and(|age| self.max_age < age) {
+            self.num_stale += 1;
+            return false;
+        }
+        let Some(max_hz) = max_hz else {
+            return true;
+        };
+
+        let now = Instant::now();
+        let min_interval = Duration::from_secs_f64(1.0 / max_hz);
+        let is_too_soon = self
+            .last_sent
+            .get(stream)
+            .is_some_and(|last_sent| now.duration_since(*last_sent) < min_interval);
+        if is_too_soon {
+            self.num_rate_limited += 1;
+            return false;
+        }
+        self.last_sent.insert(stream.clone(), now);
+        true
+    }
+
+    fn report_and_reset(&mut self) {
+        let num_stale = std::mem::take(&mut self.num_stale);
+        let num_rate_limited = std::mem::take(&mut self.num_rate_limited);
+        if 0 < num_stale + num_rate_limited {
+            log::info!(
+                "Latest-wins messages not sent: {num_stale} stale, {num_rate_limited} over `max_hz`"
+            );
+        }
+    }
+}
+
+/// Sends latest-wins messages on a lossy data track, a burst at a time.
+///
+/// LiveKit keeps only the newest unsent data track frame of a participant, so of two frames
+/// pushed back to back the first can be lost. Sending the messages that were logged together
+/// as one frame keeps them from evicting each other.
+struct LatestLane {
+    track: LocalDataTrack,
+
+    /// Messages waiting to go out as one frame.
+    pending: LatestFrame,
+    pending_bytes: usize,
+    num_queue_full: u64,
+}
+
+impl LatestLane {
+    fn new(track: LocalDataTrack) -> Self {
+        Self {
+            track,
+            pending: LatestFrame::default(),
+            pending_bytes: 0,
+            num_queue_full: 0,
+        }
+    }
+
+    /// Adds a message to the frame that the next [`Self::flush`] sends.
+    fn send(&mut self, stream: &StreamKey, bytes: Bytes) {
+        if MAX_LATEST_BYTES < bytes.len() {
+            log::warn!(
+                "Dropping a {} byte message of {stream}: too large for the lossy lane. \
+                 Reduce it at the source, or give it `delivery = \"guaranteed\"` in the rules",
+                bytes.len()
+            );
+            return;
+        }
+        if MAX_LATEST_BYTES < self.pending_bytes + bytes.len() {
+            self.flush();
+        }
+        self.pending_bytes += bytes.len();
+        self.pending.log_msgs.push(bytes);
+    }
+
+    /// Sends what [`Self::send`] collected, as one frame.
+    fn flush(&mut self) {
+        if self.pending.log_msgs.is_empty() {
+            return;
+        }
+        let frame = std::mem::take(&mut self.pending).encode_to_vec();
+        self.pending_bytes = 0;
+        if self.track.try_push(DataTrackFrame::new(frame)).is_err() {
+            self.num_queue_full += 1;
+        }
+    }
+
+    fn report_and_reset(&mut self) {
+        let num_queue_full = std::mem::take(&mut self.num_queue_full);
+        if 0 < num_queue_full {
+            log::info!("Latest-wins frames dropped because the link was busy: {num_queue_full}");
+        }
+    }
+}
+
+// ----------------------------------------------------------------------------
+
+/// What an operator who joins late needs to see the same scene as everyone else.
+///
+/// LiveKit replays nothing to late joiners, so this mirrors what Rerun's own proxy keeps for
+/// late viewers: store info and blueprints forever, and static data up to a memory limit.
+struct ReplayCache {
+    persistent: Vec<ByteStreamMessage>,
+    static_data: VecDeque<ByteStreamMessage>,
+    static_data_bytes: usize,
+    static_limit_bytes: usize,
+
+    /// Whether static data was ever dropped to stay within the limit.
+    has_evicted: bool,
+}
+
+impl ReplayCache {
+    fn new(static_limit_bytes: usize) -> Self {
+        Self {
+            persistent: Vec::new(),
+            static_data: VecDeque::new(),
+            static_data_bytes: 0,
+            static_limit_bytes,
+            has_evicted: false,
+        }
+    }
+
+    fn insert(&mut self, retention: Retention, message: &ByteStreamMessage) {
+        match retention {
+            Retention::Persistent => self.persistent.push(message.clone()),
+            Retention::Static => {
+                self.static_data_bytes += message.bytes.len();
+                self.static_data.push_back(message.clone());
+                while self.static_limit_bytes < self.static_data_bytes {
+                    let Some(evicted) = self.static_data.pop_front() else {
+                        break;
+                    };
+                    self.static_data_bytes -= evicted.bytes.len();
+                    if !self.has_evicted {
+                        self.has_evicted = true;
+                        log::warn!(
+                            "The static data no longer fits in `--replay-limit-bytes` ({} bytes). \
+                             Operators who join from now on will miss the oldest of it",
+                            self.static_limit_bytes
+                        );
+                    }
+                }
+            }
+            Retention::None => {}
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.persistent.len() + self.static_data.len()
+    }
+
+    /// Store info and blueprints first, so the viewer knows the stores before their data.
+    fn iter(&self) -> impl Iterator<Item = ByteStreamMessage> {
+        itertools::chain!(&self.persistent, &self.static_data).cloned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn message(num_bytes: usize) -> ByteStreamMessage {
+        ByteStreamMessage {
+            topic: LOG_TOPIC,
+            bytes: Bytes::from(vec![0; num_bytes]),
+        }
+    }
+
+    #[test]
+    fn replay_evicts_the_oldest_static_data_only() {
+        let mut replay = ReplayCache::new(100);
+        replay.insert(Retention::Persistent, &message(1000));
+        replay.insert(Retention::None, &message(1000));
+        for num_bytes in [40, 41, 42] {
+            replay.insert(Retention::Static, &message(num_bytes));
+        }
+
+        let sizes: Vec<_> = replay.iter().map(|message| message.bytes.len()).collect();
+        assert_eq!(sizes, [1000, 41, 42]);
+        assert!(replay.has_evicted);
+    }
+
+    #[test]
+    fn gate_drops_stale_and_too_frequent_messages() {
+        let mut gate = Gate::new(Duration::from_secs(1));
+        let (camera, lidar) = (
+            StreamKey::for_test("/camera"),
+            StreamKey::for_test("/lidar"),
+        );
+        let fresh = Some(Duration::from_millis(10));
+
+        assert!(!gate.admits(&camera, None, Some(Duration::from_secs(2))));
+        assert!(
+            gate.admits(&camera, None, None),
+            "an unknown age is not stale"
+        );
+
+        assert!(gate.admits(&camera, Some(1.0), fresh));
+        assert!(
+            !gate.admits(&camera, Some(1.0), fresh),
+            "second message within a second"
+        );
+        assert!(
+            gate.admits(&lidar, Some(1.0), fresh),
+            "each stream has its own rate"
+        );
+
+        assert_eq!((gate.num_stale, gate.num_rate_limited), (1, 1));
+    }
+}

@@ -30,7 +30,10 @@ all-features = true
 
 [advisories]
 version = 2
-ignore = []
+ignore = [
+  { id = "RUSTSEC-2024-0436", reason = "paste comes in through Rerun (re_query, re_string_interner). It is a proc-macro with no runtime code. Remove when Rerun drops it." },
+  { id = "RUSTSEC-2026-0543", reason = "chrono comes in through arrow, which Rerun depends on. Remove when arrow drops it." },
+]
 
 
 [bans]
@@ -40,7 +43,25 @@ deny = [
   { name = "openssl", reason = "Use rustls" },
   { name = "openssl-sys", reason = "Use rustls" },
 ]
-skip = []
+skip = [
+  # Rerun and LiveKit each bring their own versions of these.
+  { name = "base64" },
+  { name = "console" },
+  { name = "convert_case" },
+  { name = "foldhash" },
+  { name = "getrandom" },
+  { name = "hashbrown" },
+  { name = "itertools" },
+  { name = "miniz_oxide" },
+  { name = "nix" },
+  { name = "strsim" },
+  { name = "syn" },
+  { name = "thiserror" },
+  { name = "thiserror-impl" },
+  { name = "toml_datetime" },
+  { name = "windows-sys" },
+  { name = "winnow" },
+]
 skip-tree = []
 
 
@@ -55,6 +76,7 @@ allow = [
   "BSD-3-Clause",                   # https://tldrlegal.com/license/bsd-3-clause-license-(revised)
   "BSL-1.0",                        # https://tldrlegal.com/license/boost-software-license-1.0-explained
   "CC0-1.0",                        # https://creativecommons.org/publicdomain/zero/1.0/
+  "CDLA-Permissive-2.0",            # https://cdla.dev/permissive-2-0/ - used by webpki-roots
   "ISC",                            # https://www.tldrlegal.com/license/isc-license
   "MIT-0",                          # https://choosealicense.com/licenses/mit-0/
   "MIT",                            # https://tldrlegal.com/license/mit-license

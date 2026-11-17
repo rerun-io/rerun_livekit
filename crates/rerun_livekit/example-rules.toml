@@ -1,0 +1,35 @@
+# Rules for what the robot side sends, and how:
+#
+#     rerun-livekit robot --rules example-rules.toml
+#
+# The first rule whose `entities` filter matches an entity decides. Entities that no rule
+# matches are sent with the defaults. `entities` uses Rerun's entity path filter syntax.
+#
+# Rules only apply to temporal data. Blueprints and static data (meshes, pinholes, annotation
+# contexts, …) are always sent, because the operator's viewer cannot show the scene without them.
+
+# Nothing under /debug leaves the robot.
+[[rule]]
+entities = "/debug/**"
+drop = true
+
+# The wrist camera is only needed at 10 frames per second.
+[[rule]]
+entities = "/camera/wrist/**"
+max_hz = 10
+
+# Send this depth-aligned image unchanged instead of as lossy video.
+[[rule]]
+entities = "/camera/front/aligned"
+video = false
+
+# A lidar that logs faster than an operator can see.
+[[rule]]
+entities = "/lidar/**"
+max_hz = 5
+
+# Every one of these must arrive, in order, even when the link is slow.
+# By default that is only the case for text logs, state changes, clears and video streams.
+[[rule]]
+entities = "/mission/**"
+delivery = "guaranteed"
