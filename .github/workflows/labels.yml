@@ -15,6 +15,11 @@ on:
       - labeled
       - unlabeled
 
+# The label check reads the PR's labels, which the default token of this repository may not.
+permissions:
+  issues: read
+  pull-requests: read
+
 jobs:
   label:
     runs-on: ubuntu-latest
