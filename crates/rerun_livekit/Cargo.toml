@@ -1,13 +1,13 @@
 [package]
 authors.workspace = true
 categories = []                                                      # TODO: fill in if you plan on publishing the crate
-description = ""                                                     # TODO: fill in if you plan on publishing the crate
+description = "Carry any Rerun stream over a LiveKit room, for teleoperation"
 edition.workspace = true
 homepage.workspace = true
 include = ["LICENSE-APACHE", "LICENSE-MIT", "**/*.rs", "Cargo.toml"]
 keywords = []                                                        # TODO: fill in if you plan on publishing the crate
 license.workspace = true
-name = "new_project_name"
+name = "rerun_livekit"
 publish = false                                                      # TODO: set to `true` if you plan on publishing the crate
 readme = "README.md"
 repository.workspace = true
@@ -19,14 +19,46 @@ workspace = true
 
 [package.metadata.docs.rs]
 all-features = true
-targets = ["x86_64-unknown-linux-gnu", "wasm32-unknown-unknown"]
+targets = ["x86_64-unknown-linux-gnu"]
 
 
 [features]
 default = []
 
 
+[[bin]]
+name = "rerun-livekit"
+path = "src/main.rs"
+
+
 [dependencies]
+# Rerun
+re_protos.workspace = true
+rerun.workspace = true
+
+# LiveKit
+livekit.workspace = true
+livekit-api.workspace = true
+
+# External
+ahash.workspace = true
+anyhow.workspace = true
+bytes.workspace = true
+clap.workspace = true
+env_logger.workspace = true
+futures-util.workspace = true
+image.workspace = true
+itertools.workspace = true
+log.workspace = true
+parking_lot.workspace = true
+prost.workspace = true
+rand.workspace = true
+serde.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+toml.workspace = true
+tonic.workspace = true
 
 
 [dev-dependencies]
+crossterm.workspace = true

@@ -4,3 +4,4 @@
 
 [default.extend-words]
 teh = "teh"     # part of @teh-cmc
+typ = "typ"     # `Timeline::typ` in Rerun's API
