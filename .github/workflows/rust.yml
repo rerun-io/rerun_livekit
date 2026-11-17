@@ -36,7 +36,7 @@ jobs:
 
       - uses: prefix-dev/setup-pixi@v0.8.8
         with:
-          pixi-version: v0.42.1
+          pixi-version: v0.84.2
 
       - name: Rustfmt
         run: pixi run cargo fmt --all -- --check

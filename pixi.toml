@@ -25,29 +25,6 @@ version = "0.1.0"
 
 [tasks]
 # ------------------------------------------------------------------------------------------
-# C++ stuff:
-# Note: extra CLI argument after `pixi run TASK` are passed to the task cmd.
-
-# Clean C++ build artifacts
-clean = { cmd = "rm -rf build bin CMakeFiles/" }
-print-env = { cmd = "echo $PATH" }
-prepare = "cmake -G 'Ninja' -B build -S . -DCMAKE_BUILD_TYPE=RelWithDebInfo"
-
-# Build C++ example
-build = { cmd = "cmake --build build --config RelWithDebInfo --target all", depends-on = [
-    "prepare",
-] }
-
-# Run C++ example
-example = { cmd = "build/rerun_livekit", depends-on = ["build"] }
-
-# Format C++ code
-cpp-fmt = { cmd = "clang-format -i src/*.[hc]pp" }
-
-# Check formatting of C++ code
-cpp-fmt-check = { cmd = "clang-format --dry-run --Werror -i src/*.[hc]pp" }
-
-# ------------------------------------------------------------------------------------------
 # Python stuff:
 
 # Run first ruff fix, then ruff format, order is important see also https://twitter.com/charliermarsh/status/1717229721954799727
@@ -61,12 +38,6 @@ lint-typos = "typos"
 
 
 [dependencies]
-# C++ build-tools:
-clang-tools = "16.0.6.*"          # clang-format
-cmake = "3.27.6.*"
-cxx-compiler = "1.6.0.*"
-ninja = "1.11.1.*"
-
 # Python stuff:
 mypy = "1.14.1.*"
 ruff = "0.11.6.*"
