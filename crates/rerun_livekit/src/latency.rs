@@ -4,6 +4,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use re_protos::common::v1alpha1::StoreId;
 use re_protos::sdk_comms::v1alpha1::WriteMessagesRequest;
+use rerun::external::re_log_encoding::rrd::Compression;
 use rerun::log::{Chunk, RowId};
 use rerun::{EntityPath, Scalars, TimePoint};
 use tokio::sync::mpsc;
@@ -36,7 +37,7 @@ pub struct LatencyReport {
     sum: Duration,
     max: Duration,
 
-    /// Messages that arrived before they were created, going by the two clocks.
+    /// Messages whose creation time is ahead of this machine's clock.
     num_from_the_future: u32,
     plot: Option<Plot>,
 }
@@ -99,7 +100,7 @@ impl LatencyReport {
                     plot.push(store_id, Point { timepoint, latency });
                 }
             }
-            // The robot's clock is ahead of this one. Any number would be wrong.
+            // The clock that stamped the message is ahead of this one. Any number would be wrong.
             Err(_) => self.num_from_the_future += 1,
         }
 
@@ -124,8 +125,8 @@ impl LatencyReport {
         }
         if 0 < *num_from_the_future {
             log::warn!(
-                "{name}: {num_from_the_future} messages arrived before they were sent. \
-                 The clocks of the two machines differ, so latency cannot be measured"
+                "{name}: {num_from_the_future} messages were created after they arrived, \
+                 going by the clocks. Their latency is unknown"
             );
         }
         *started = Instant::now();
@@ -191,7 +192,9 @@ impl Plot {
         let log_msg = chunk
             .build()
             .map_err(anyhow::Error::from)
-            .and_then(|chunk| crate::proxy::encode_chunk(store_id.clone(), &chunk));
+            .and_then(|chunk| {
+                crate::proxy::encode_chunk(store_id.clone(), &chunk, Compression::Off)
+            });
         match log_msg {
             // A full queue means the viewer is behind. The plot matters less than the data.
             Ok(log_msg) => {

@@ -12,7 +12,10 @@ use bytes::Bytes;
 use futures_util::StreamExt as _;
 use image::ImageEncoder as _;
 use itertools::izip;
-use livekit::options::{FrameMetadataFeatures, TrackPublishOptions, VideoCodec, VideoEncoding};
+use livekit::options::{
+    FrameMetadataFeatures, TrackPublishOptions, VideoCodec, VideoEncoding,
+    compute_appropriate_encoding,
+};
 use livekit::prelude::*;
 use livekit::webrtc::native::yuv_helper;
 use livekit::webrtc::video_frame::{
@@ -25,11 +28,12 @@ use prost::Message as _;
 use re_protos::common::v1alpha1::StoreId as StoreIdProto;
 use re_protos::log_msg::v1alpha1::LogMsg;
 use re_protos::sdk_comms::v1alpha1::WriteMessagesRequest;
+use rerun::external::re_log_encoding::rrd::Compression;
 use rerun::external::re_log_types::TimeType;
 use rerun::log::{Chunk, RowId, TimeColumn};
 use rerun::{
-    ChannelDatatype, ColorModel, EntityPath, TimePoint, Timeline, TimelineName, archetypes,
-    components, datatypes,
+    ChannelDatatype, ColorModel, ComponentIdentifier, EntityPath, TimePoint, Timeline,
+    TimelineName, archetypes, components, datatypes,
 };
 use tokio::sync::mpsc;
 
@@ -47,12 +51,6 @@ const TRACK_NAME_PREFIX: &str = "rerun.video.";
 /// LiveKit drops frame metadata over about 232 bytes (`FrameMetadata::user_data` in
 /// `libwebrtc` 0.4.1). A row id takes 16 and a time takes 8.
 const MAX_TIMELINES: usize = 16;
-
-/// Frame rate above which LiveKit drops frames.
-///
-/// Its default depends on the resolution and is as low as 15, which would silently thin out
-/// a camera. Limiting the rate is the job of `max_hz` in the rules.
-const MAX_FRAMERATE_HZ: f64 = 120.0;
 
 /// A track without frames for this long is unpublished.
 ///
@@ -343,23 +341,27 @@ fn dimension(pixels: u32) -> i32 {
 // ----------------------------------------------------------------------------
 // Robot side
 
-/// Whether `chunk` holds image rows and nothing else, so that it can travel as video.
+/// The columns of `chunk` that can travel as video, if it has images.
 ///
-/// Anything else that shares a chunk with the image (opacity, draw order) keeps the whole
-/// chunk on the data lanes: taking it apart is not worth it for a rare case.
-pub fn is_video_candidate(chunk: &Chunk) -> bool {
-    let components: Vec<_> = chunk.components_identifiers().collect();
+/// The chunk's other columns (a coordinate frame, an opacity, the original ROS message)
+/// are not part of the frames and have to travel as data.
+pub fn image_columns(chunk: &Chunk) -> Option<Vec<ComponentIdentifier>> {
+    if MAX_TIMELINES < chunk.timelines().len() {
+        return None;
+    }
+    let has = |component: &ComponentIdentifier| chunk.components().contains_key(component);
+
     let image = [
         archetypes::Image::descriptor_buffer().component,
         archetypes::Image::descriptor_format().component,
     ];
+    if image.iter().all(has) {
+        return Some(image.to_vec());
+    }
+
     let blob = archetypes::EncodedImage::descriptor_blob().component;
     let media_type = archetypes::EncodedImage::descriptor_media_type().component;
-
-    let is_image = components.len() == 2 && image.iter().all(|c| components.contains(c));
-    let is_encoded_image =
-        components.contains(&blob) && components.iter().all(|c| *c == blob || *c == media_type);
-    (is_image || is_encoded_image) && chunk.timelines().len() <= MAX_TIMELINES
+    has(&blob).then(|| [blob, media_type].into_iter().filter(has).collect())
 }
 
 /// One image row, ready to become a video frame.
@@ -454,11 +456,41 @@ pub enum Sent {
     Unsupported,
 }
 
+/// Limits for the encoder of each video track. Unset ones keep LiveKit's preset.
+///
+/// LiveKit picks a preset by resolution (`compute_appropriate_encoding` in `livekit` 0.11.0):
+/// from 15 frames per second for images under 320 wide to 30 from 960 wide. The link's
+/// congestion control lowers both limits further.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct EncoderLimits {
+    pub max_bitrate_bps: Option<u64>,
+    pub max_framerate_hz: Option<f64>,
+}
+
+impl EncoderLimits {
+    /// The encoding for a track, or `None` to let LiveKit choose it.
+    fn encoding(self, width: u32, height: u32, codec: VideoCodec) -> Option<VideoEncoding> {
+        let Self {
+            max_bitrate_bps,
+            max_framerate_hz,
+        } = self;
+        if max_bitrate_bps.is_none() && max_framerate_hz.is_none() {
+            return None;
+        }
+
+        let preset = compute_appropriate_encoding(false, width, height, codec);
+        Some(VideoEncoding {
+            max_bitrate: max_bitrate_bps.unwrap_or(preset.max_bitrate),
+            max_framerate: max_framerate_hz.unwrap_or(preset.max_framerate),
+        })
+    }
+}
+
 /// Publishes one video track per image stream.
 pub struct VideoPublisher {
     local: LocalParticipant,
     codec: VideoCodec,
-    max_bitrate_bps: u64,
+    limits: EncoderLimits,
     tracks: ahash::HashMap<StreamKey, PublishedTrack>,
     num_tracks_started: u64,
 }
@@ -471,17 +503,17 @@ struct PublishedTrack {
 }
 
 impl VideoPublisher {
-    pub fn new(local: LocalParticipant, codec: VideoCodec, max_bitrate_bps: u64) -> Self {
+    pub fn new(local: LocalParticipant, codec: VideoCodec, limits: EncoderLimits) -> Self {
         Self {
             local,
             codec,
-            max_bitrate_bps,
+            limits,
             tracks: Default::default(),
             num_tracks_started: 0,
         }
     }
 
-    /// Sends the rows of `chunk`, which must be an [`is_video_candidate`], as video frames.
+    /// Sends the image rows of `chunk`, which must have [`image_columns`], as video frames.
     pub async fn send(
         &mut self,
         stream: &StreamKey,
@@ -579,12 +611,7 @@ impl VideoPublisher {
         let options = TrackPublishOptions {
             source: TrackSource::Camera,
             video_codec: self.codec,
-            video_encoding: Some(VideoEncoding {
-                max_bitrate: self.max_bitrate_bps,
-                max_framerate: MAX_FRAMERATE_HZ,
-            }),
-            // One operator view per stream: a second, smaller encoding would only cost bitrate.
-            simulcast: false,
+            video_encoding: self.limits.encoding(info.width, info.height, self.codec),
             frame_metadata_features,
             ..Default::default()
         };
@@ -827,7 +854,8 @@ fn to_log_msg(info: &TrackInfo, user_data: &[u8], mut i420: I420Buffer) -> anyho
     Ok(Rebuilt {
         row_id,
         timepoint,
-        log_msg: crate::proxy::encode_chunk(store_id, &chunk)?,
+        // The viewer is next door, so compressing would only cost time.
+        log_msg: crate::proxy::encode_chunk(store_id, &chunk, Compression::Off)?,
     })
 }
 

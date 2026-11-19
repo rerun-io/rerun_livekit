@@ -4,13 +4,7 @@ Carry any [Rerun](https://rerun.io) stream over a [LiveKit](https://livekit.com)
 
 This is an example of using the two together. It needs no changes to Rerun, to LiveKit, or to the app that logs.
 
-```
-robot app ─connect_grpc─▶ rerun --serve-grpc ─▶ rerun-livekit robot ─┐
-                                                                     │ LiveKit room
-        Rerun viewer ◀──────────────── rerun-livekit operator ◀──────┘
-
-your operator input ──any command bytes──▶ your robot code   (rerun_livekit::control)
-```
+![An app logs to a Rerun proxy on the robot. `rerun-livekit robot` reads from it and sends video and data through a LiveKit room to `rerun-livekit operator`, which feeds a Rerun viewer. Commands travel back through the same room, from the operator's input to the robot's code.](docs/bridge.svg)
 
 - **Any Rerun app works.** The robot side reads from the gRPC proxy that every Rerun viewer and `rerun --serve-grpc` hosts, so the app can be written with any Rerun SDK and does not know the bridge exists.
 - **The operator sees the same recording.** Entity paths, archetypes, components, timelines, row ids and the blueprint are the same on both sides. Only pixel values (video is lossy) and rates (what you choose to drop) differ.
@@ -30,7 +24,7 @@ rerun --port 9877                          # operator side: the viewer
 cargo run --release -- robot
 cargo run --release -- operator --viewer rerun+http://127.0.0.1:9877/proxy
 
-cargo run --release --example sim_robot    # a simulated robot that logs to port 9876
+cargo run --release --example sim_robot    # a simulated robot that logs to port 9876 (add `-- --save episode.rrd` to record)
 cargo run --release --example keyboard_teleop   # drive it: w/x a/d, space to stop, q to quit
 ```
 
@@ -40,7 +34,20 @@ Any other app works in place of `sim_robot`: point it at `rerun+http://127.0.0.1
 
 ### Two machines
 
-Give every command the same room: `--url`, `--api-key`, `--api-secret` and `--room`, or the `LIVEKIT_URL`, `LIVEKIT_API_KEY` and `LIVEKIT_API_SECRET` environment variables. Use [LiveKit Cloud](https://cloud.livekit.io) or [host the server](https://docs.livekit.io/transport/self-hosting/) where both machines can reach it. Each participant needs its own `--identity`.
+Give every command the same room: `--url`, `--api-key`, `--api-secret` and `--room`, or the `LIVEKIT_URL`, `LIVEKIT_API_KEY` and `LIVEKIT_API_SECRET` environment variables. Each participant needs its own `--identity`.
+
+Both machines have to reach one LiveKit server. To host it yourself, put both machines on one [Tailscale](https://tailscale.com) network and run the server on the robot:
+
+```sh
+livekit-server --dev --bind 0.0.0.0 --node-ip $(tailscale ip -4)   # on the robot
+export LIVEKIT_URL=ws://<robot>:7880                               # on the operator's machine
+```
+
+- `--node-ip` makes the server offer its Tailscale address for video and data.
+- `--dev` uses a well-known key, so keep the server inside the Tailscale network.
+- `tailscale ping <robot>` should report a direct connection. A relayed one runs on TCP, which brings back the stalls that WebRTC avoids.
+
+[LiveKit Cloud](https://cloud.livekit.io) works too and needs no network setup.
 
 For a web viewer on the operator side, run `rerun --serve-web` there and pass its proxy address as `--viewer`.
 
@@ -52,11 +59,27 @@ The robot side looks at each chunk and picks one of three lanes:
 |---|---|---|---|
 | Guaranteed | Blueprints, static data, and temporal `Clear`, `TextLog`, `TextDocument`, `StateChange`, `VideoFrameReference`, `VideoStream` | Byte streams | Queues up instead of dropping. What is still queued is lost if the session restarts. |
 | Latest | All other temporal data | A data track, one frame per burst of logging | Old messages are dropped. |
-| Video | 8-bit `Image` (L, RGB, RGBA, BGR, BGRA) and JPEG or PNG `EncodedImage` | One video track per image stream | Bitrate and resolution drop. |
+| Video | 8-bit `Image` (L, RGB, RGBA, BGR, BGRA) and JPEG or PNG `EncodedImage` | One video track per image stream, with simulcast | Bitrate, frame rate and resolution drop, per operator. |
 
-Chunks on the guaranteed and latest lanes are forwarded as they are: the bridge reads them to route them, but never rewrites them. Images on the video lane are rebuilt on the operator side with the same entity path, row id, times, resolution and colour model.
+Chunks on the guaranteed and latest lanes are forwarded as they are, unless a rule drops some of their components. Images on the video lane are rebuilt on the operator side with the same entity path, row id, times, resolution and colour model. Anything else logged in the same chunk as an image (a coordinate frame, an opacity) travels as data.
 
 Latest-wins data is dropped at the robot when it is older than `--max-age-millis` (one second by default), because for teleoperation stale data is worse than none.
+
+Video tracks use LiveKit's encoder defaults, which depend on the image width: 15 frames per second below 320, 20 below 640, 25 below 960 (720 for 4:3 images), and 30 from there up. A faster camera arrives at that rate. Raise the limits with `--video-max-framerate-hz` and `--video-max-bitrate-bps`. Each track is sent in several qualities, so an operator on a weak link gets a lower one without lowering it for the others.
+
+## Recording on the robot
+
+The operator's copy is lossy, so record on the robot. An app can write a file and feed the bridge from one stream:
+
+```rust
+let rec = rerun::RecordingStreamBuilder::new("rerun_example_my_robot")
+    .batcher_config(ChunkBatcherConfig::LOW_LATENCY)
+    .set_sinks((GrpcSink::new(proxy_uri), FileSink::new("episode.rrd")?))?;
+```
+
+`sim_robot --save episode.rrd` does this. Set the batcher config, or the file sink slows flushing from 8 ms to 200 ms for both sinks. The two sinks share one queue, so if the proxy stops accepting data the file stops growing too.
+
+A ROS 2 robot gets the same from `ros2 bag record` with [`rosbag2_storage_rrd`](https://github.com/rerun-io/rosbag2_storage_rrd).
 
 ## Choosing what to send
 
@@ -72,9 +95,11 @@ entities = "/camera/wrist/**"
 max_hz = 10
 ```
 
-The first rule that matches an entity decides. See [`example-rules.toml`](crates/rerun_livekit/example-rules.toml) for every option: `drop`, `max_hz`, `video` and `delivery`.
+The first rule that matches an entity decides. See [`example-rules.toml`](crates/rerun_livekit/example-rules.toml) for every option: `drop`, `max_hz`, `video`, `delivery` and `drop_components`.
 
 Rules only apply to temporal data. Blueprints and static data are always sent.
+
+`delivery = "latched"` is for temporal data that is sent once and has to stay known, such as `/tf_static` from ROS: it is guaranteed, and operators who join later get all of it.
 
 ## Commands back to the robot
 
@@ -113,10 +138,10 @@ loop {
 
 - **The first frames of a camera are lost** while its video track starts.
 - **Alpha does not survive video.** `RGBA` and `BGRA` images come back opaque.
-- **Other images are not video.** 16-bit, float and chroma-subsampled images, depth images, and images logged together with other components (such as opacity) travel unchanged on the latest lane.
+- **Other images are not video.** 16-bit, float and chroma-subsampled images and depth images travel unchanged on the latest lane.
 - **Latest-wins data can be lost without any network loss.** LiveKit keeps only the newest unsent data track frame of a participant. The bridge sends everything logged together as one frame so that messages do not evict each other, but a frame can still be replaced by the next one while a large frame is going out.
 - **A latest-wins message over about 1.9 MB is dropped**, with a warning. Raw images that are not video and dense point clouds can exceed that. Reduce them at the source, or mark them `delivery = "guaranteed"`.
-- **`VideoStream` is forwarded as data**, on the guaranteed lane, without LiveKit's video transport.
+- **`VideoStream` is forwarded as data**, on the guaranteed lane, without LiveKit's video transport. Sending its samples over a video track without re-encoding needs LiveKit to hand received video over undecoded, which is in review ([rust-sdks#1515](https://github.com/livekit/rust-sdks/pull/1515)).
 - **Images arrive decoded**, so the operator's viewer holds raw frames in memory. The viewer's memory limit takes care of old ones.
 - **Control has no clock.** A command is valid from when it arrives until the watchdog timeout. A command the network delays is not detected as old.
 
@@ -129,8 +154,9 @@ On one Apple Silicon laptop, with everything on localhost, release builds, and `
 | | Mean | Max |
 |---|---|---|
 | Latest-wins data, from chunk creation to the operator side | 5 ms | 12 ms |
-| Video, from the log call to a decoded frame on the operator side | 13 ms | 20 ms |
+| Video, from the log call to a decoded frame on the operator side | 14 ms | 21 ms |
 
+- The camera arrives at 25 frames per second, LiveKit's default for its size.
 - These numbers stop at the operator side of the bridge. They leave out the viewer's ingestion and drawing, and a real network.
 - The operator side logs them every ten seconds. Across two machines they include the difference between the two clocks.
 - `rerun-livekit operator --plot-latency` also plots them in the viewer, one series for data and one per camera, under `/livekit/latency_ms`. Each point sits at the times of the message it measures, so the plots line up with the data on every timeline. This is the one case where the bridge adds entities the robot did not log, so it is off by default.
@@ -159,3 +185,4 @@ The smoke test needs `livekit-server` and `rerun` on the `PATH`, and Python with
 | [`examples/sim_robot.rs`](crates/rerun_livekit/examples/sim_robot.rs) | A simulated robot to try it with |
 | [`examples/keyboard_teleop.rs`](crates/rerun_livekit/examples/keyboard_teleop.rs) | Drives it from the keyboard |
 | [`scripts/smoke_test.py`](scripts/smoke_test.py) | End-to-end check on one machine |
+| [`docs/`](docs) | The diagrams, as [D2](https://d2lang.com) sources. Render with `d2 --layout elk --pad 30 docs/bridge.d2 docs/bridge.svg` |

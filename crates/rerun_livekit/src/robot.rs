@@ -14,13 +14,15 @@ use prost::Message as _;
 use re_protos::log_msg::v1alpha1::LogMsg;
 use re_protos::log_msg::v1alpha1::log_msg::Msg;
 use re_protos::sdk_comms::v1alpha1::ReadMessagesRequest;
+use rerun::external::re_log_encoding::rrd::Compression;
 use rerun::external::re_uri::ProxyUri;
+use rerun::log::Chunk;
 use tokio::sync::mpsc;
 
-use crate::classify::{Retention, Route, StreamKey, classify};
+use crate::classify::{Retention, Route, StreamKey, Temporal, classify};
 use crate::room::{LATEST_TRACK, LOG_TOPIC, LatestFrame, Role, RoomArgs};
-use crate::rules::Rules;
-use crate::video::{Sent, TRACK_INFO_TOPIC, VideoCodecArg, VideoPublisher};
+use crate::rules::{Delivery, Rules};
+use crate::video::{EncoderLimits, Sent, TRACK_INFO_TOPIC, VideoCodecArg, VideoPublisher};
 
 /// The largest message the latest lane can carry.
 ///
@@ -53,9 +55,15 @@ pub struct RobotArgs {
     #[arg(long, value_enum, default_value_t = VideoCodecArg::H264)]
     video_codec: VideoCodecArg,
 
-    /// Most bits per second a video track may use. The link's congestion control lowers it.
-    #[arg(long, default_value_t = 4_000_000)]
-    video_max_bitrate_bps: u64,
+    /// Most bits per second a video track may use. Without it, LiveKit picks a limit by
+    /// resolution. The link's congestion control lowers it further.
+    #[arg(long)]
+    video_max_bitrate_bps: Option<u64>,
+
+    /// Most frames per second a video track may send. Without it, LiveKit picks a limit by
+    /// image width: 15 below 320, 20 below 640, 25 below 960, 30 from there up.
+    #[arg(long)]
+    video_max_framerate_hz: Option<f64>,
 
     /// How much static data to keep for operators who join later, in bytes.
     #[arg(long, default_value_t = 256 * 1024 * 1024)]
@@ -107,7 +115,14 @@ async fn forward(
         rules,
         gate: Gate::new(Duration::from_millis(args.max_age_millis)),
         latest: LatestLane::new(latest_track),
-        video: VideoPublisher::new(local, args.video_codec.into(), args.video_max_bitrate_bps),
+        video: VideoPublisher::new(
+            local,
+            args.video_codec.into(),
+            EncoderLimits {
+                max_bitrate_bps: args.video_max_bitrate_bps,
+                max_framerate_hz: args.video_max_framerate_hz,
+            },
+        ),
         replay: ReplayCache::new(args.replay_limit_bytes),
         guaranteed_tx,
     };
@@ -185,30 +200,73 @@ impl Router<'_> {
             Route::Guaranteed(retention) => {
                 self.queue_guaranteed(retention, LOG_TOPIC, encode());
             }
-            Route::Latest { stream, max_hz } => {
-                if self.gate.admits(&stream, max_hz, age) {
-                    self.latest.send(&stream, encode());
-                }
-            }
-            Route::Video {
-                stream,
-                max_hz,
-                store_id,
-                chunk,
-            } => {
-                if self.gate.admits(&stream, max_hz, age) {
-                    match self.video.send(&stream, &store_id, &chunk).await? {
-                        Sent::Video {
-                            new_track: Some(info),
-                        } => {
-                            self.queue_guaranteed(Retention::Persistent, TRACK_INFO_TOPIC, info);
-                        }
-                        Sent::Video { new_track: None } => {}
-                        Sent::Unsupported => self.latest.send(&stream, encode()),
-                    }
-                }
-            }
+            Route::Temporal(temporal) => self.route_temporal(*temporal, &log_msg, age).await?,
             Route::Drop => {}
+        }
+        Ok(())
+    }
+
+    async fn route_temporal(
+        &mut self,
+        temporal: Temporal,
+        original: &LogMsg,
+        age: Option<Duration>,
+    ) -> anyhow::Result<()> {
+        let Temporal {
+            stream,
+            max_hz,
+            delivery,
+            store_id,
+            chunk,
+            is_whole,
+            image_columns,
+        } = temporal;
+
+        // Staleness and `max_hz` apply to what may be dropped: latest-wins data and video.
+        let is_guaranteed = match delivery {
+            Delivery::Guaranteed | Delivery::Latched => true,
+            Delivery::Latest => false,
+        };
+        let is_gated = !is_guaranteed || image_columns.is_some();
+        let is_admitted = !is_gated || self.gate.admits(&stream, max_hz, age);
+        if !is_admitted && !is_guaranteed {
+            return Ok(());
+        }
+
+        // The image columns leave the chunk if they went out as video, or were not admitted.
+        let mut columns_not_sent_as_data = Vec::new();
+        if let Some(image_columns) = image_columns {
+            if !is_admitted {
+                columns_not_sent_as_data = image_columns;
+            } else if let Sent::Video { new_track } =
+                self.video.send(&stream, &store_id, &chunk).await?
+            {
+                if let Some(info) = new_track {
+                    self.queue_guaranteed(Retention::Persistent, TRACK_INFO_TOPIC, info);
+                }
+                columns_not_sent_as_data = image_columns;
+            }
+        }
+
+        let encode = |chunk: &Chunk| {
+            crate::proxy::encode_chunk(store_id.clone(), chunk, Compression::LZ4)
+                .map(|log_msg| Bytes::from(log_msg.encode_to_vec()))
+        };
+        let bytes = if !columns_not_sent_as_data.is_empty() {
+            let rest = chunk.components_dropped(&columns_not_sent_as_data);
+            if rest.components().is_empty() {
+                return Ok(());
+            }
+            encode(&rest)?
+        } else if is_whole {
+            Bytes::from(original.encode_to_vec())
+        } else {
+            encode(&chunk)?
+        };
+        match delivery {
+            Delivery::Guaranteed => self.queue_guaranteed(Retention::None, LOG_TOPIC, bytes),
+            Delivery::Latched => self.queue_guaranteed(Retention::Static, LOG_TOPIC, bytes),
+            Delivery::Latest => self.latest.send(&stream, bytes),
         }
         Ok(())
     }

@@ -25,13 +25,16 @@ pub async fn connect(uri: &ProxyUri) -> anyhow::Result<MessageProxyServiceClient
         .max_encoding_message_size(usize::MAX))
 }
 
-/// Encodes `chunk` as a message of the recording `store_id`, for a viewer on this machine.
-pub fn encode_chunk(store_id: StoreId, chunk: &Chunk) -> anyhow::Result<LogMsg> {
+/// Encodes `chunk` as a message of the recording `store_id`.
+pub fn encode_chunk(
+    store_id: StoreId,
+    chunk: &Chunk,
+    compression: Compression,
+) -> anyhow::Result<LogMsg> {
     let arrow_msg = chunk.to_arrow_msg().context("Failed to encode a chunk")?;
     let store_id = rerun::StoreId::try_from(store_id).context("Invalid store id")?;
-    // The viewer is next door, so compressing would only cost time.
     let msg = rerun::log::LogMsg::ArrowMsg(store_id, arrow_msg)
-        .to_transport(Compression::Off)
+        .to_transport(compression)
         .context("Failed to encode a chunk")?;
     Ok(msg.into())
 }

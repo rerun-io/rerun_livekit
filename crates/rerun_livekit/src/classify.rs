@@ -8,8 +8,8 @@ use rerun::external::re_log_encoding::ToApplication as _;
 use rerun::log::Chunk;
 use rerun::{Archetype as _, ArchetypeName, ComponentIdentifier, EntityPath, archetypes};
 
-use crate::rules::{Action, Delivery, Rules, Video};
-use crate::video::is_video_candidate;
+use crate::rules::{Action, Delivery, Rules, Video, glob_matches};
+use crate::video::image_columns;
 
 /// Archetypes whose temporal data is guaranteed by default, because losing one message
 /// leaves the viewer wrong until something else corrects it.
@@ -31,26 +31,35 @@ fn is_guaranteed_by_default(archetype: ArchetypeName) -> bool {
 /// How a message travels.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Route {
-    /// Never dropped, delivered in order.
+    /// Forwarded as it is. Never dropped, delivered in order.
     Guaranteed(Retention),
 
-    /// Dropped when late or when the link cannot keep up.
-    Latest {
-        stream: StreamKey,
-
-        /// Send at most this many messages of `stream` per second.
-        max_hz: Option<f64>,
-    },
-
-    /// Image rows that travel as video frames. Dropped like [`Self::Latest`].
-    Video {
-        stream: StreamKey,
-        max_hz: Option<f64>,
-        store_id: StoreId,
-        chunk: Box<Chunk>,
-    },
+    /// A chunk of temporal data, which the rules may thin out, trim, or send as video.
+    Temporal(Box<Temporal>),
 
     Drop,
+}
+
+/// A chunk of temporal data and how the rules say it travels.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Temporal {
+    pub stream: StreamKey,
+
+    /// Send at most this many chunks of `stream` per second, unless delivery is guaranteed.
+    pub max_hz: Option<f64>,
+
+    /// How the chunk travels, apart from any images that go as video.
+    pub delivery: Delivery,
+    pub store_id: StoreId,
+
+    /// The chunk without the components the rules drop.
+    pub chunk: Chunk,
+
+    /// Whether the rules dropped nothing, so that the original message can be forwarded as it is.
+    pub is_whole: bool,
+
+    /// The columns of `chunk` that may travel as video, if it has images and the rules allow it.
+    pub image_columns: Option<Vec<ComponentIdentifier>>,
 }
 
 /// Whether to keep a guaranteed message for operators who join later.
@@ -59,7 +68,7 @@ pub enum Retention {
     /// Store info and blueprints: kept forever.
     Persistent,
 
-    /// Static data: kept up to a memory limit.
+    /// Static data, and temporal data the rules call latched: kept up to a memory limit.
     Static,
 
     /// Temporal data: not kept.
@@ -115,29 +124,32 @@ pub fn classify(log_msg: &LogMsg, rules: &Rules) -> anyhow::Result<Route> {
         return Ok(Route::Guaranteed(Retention::Static));
     }
 
-    let (max_hz, delivery, video) = match rules.action_for(chunk.entity_path()) {
-        Action::Drop => return Ok(Route::Drop),
-        Action::Forward {
-            max_hz,
-            delivery,
-            video,
-        } => (max_hz, delivery, video),
+    let Action::Forward {
+        max_hz,
+        delivery,
+        video,
+        drop_components,
+    } = rules.action_for(chunk.entity_path())
+    else {
+        return Ok(Route::Drop);
     };
 
-    let mut components: Vec<_> = chunk.components_identifiers().collect();
-    components.sort();
-    let stream = StreamKey {
-        recording_id: store_id.recording_id.clone(),
-        entity_path: chunk.entity_path().clone(),
-        components,
+    let dropped: Vec<_> = chunk
+        .components_identifiers()
+        .filter(|component| {
+            drop_components
+                .iter()
+                .any(|pattern| glob_matches(pattern, component.as_str()))
+        })
+        .collect();
+    let is_whole = dropped.is_empty();
+    let chunk = if is_whole {
+        chunk
+    } else {
+        chunk.components_dropped(&dropped)
     };
-    if video == Video::Allowed && is_video_candidate(&chunk) {
-        return Ok(Route::Video {
-            stream,
-            max_hz,
-            store_id: store_id.clone(),
-            chunk: Box::new(chunk),
-        });
+    if chunk.components().is_empty() {
+        return Ok(Route::Drop);
     }
 
     let delivery = delivery.unwrap_or_else(|| {
@@ -152,10 +164,26 @@ pub fn classify(log_msg: &LogMsg, rules: &Rules) -> anyhow::Result<Route> {
             Delivery::Latest
         }
     });
-    Ok(match delivery {
-        Delivery::Guaranteed => Route::Guaranteed(Retention::None),
-        Delivery::Latest => Route::Latest { stream, max_hz },
-    })
+    let image_columns = match video {
+        Video::Allowed => image_columns(&chunk),
+        Video::Off => None,
+    };
+
+    let mut components: Vec<_> = chunk.components_identifiers().collect();
+    components.sort();
+    Ok(Route::Temporal(Box::new(Temporal {
+        stream: StreamKey {
+            recording_id: store_id.recording_id.clone(),
+            entity_path: chunk.entity_path().clone(),
+            components,
+        },
+        max_hz: *max_hz,
+        delivery,
+        store_id: store_id.clone(),
+        chunk,
+        is_whole,
+        image_columns,
+    })))
 }
 
 #[cfg(test)]
@@ -192,6 +220,13 @@ mod tests {
         Rules::parse(toml).unwrap()
     }
 
+    fn temporal(log_msg: &LogMsg, rules: &Rules) -> Temporal {
+        match classify(log_msg, rules).unwrap() {
+            Route::Temporal(temporal) => *temporal,
+            route @ (Route::Guaranteed(_) | Route::Drop) => panic!("not temporal: {route:?}"),
+        }
+    }
+
     #[test]
     fn temporal_data_is_latest_by_default() {
         let msg = log_msg(
@@ -199,11 +234,11 @@ mod tests {
             at_step_1(),
             &rerun::Scalars::single(1.0),
         );
-        let route = classify(&msg, &Rules::default()).unwrap();
-        assert!(
-            matches!(route, Route::Latest { max_hz: None, .. }),
-            "{route:?}"
-        );
+        let temporal = temporal(&msg, &Rules::default());
+        assert_eq!(temporal.delivery, Delivery::Latest);
+        assert_eq!(temporal.max_hz, None);
+        assert!(temporal.is_whole);
+        assert_eq!(temporal.image_columns, None);
     }
 
     #[test]
@@ -214,8 +249,8 @@ mod tests {
             &rerun::TextLog::new("hi"),
         );
         assert_eq!(
-            classify(&msg, &Rules::default()).unwrap(),
-            Route::Guaranteed(Retention::None)
+            temporal(&msg, &Rules::default()).delivery,
+            Delivery::Guaranteed
         );
     }
 
@@ -253,20 +288,58 @@ mod tests {
         );
         let msg = log_msg(rerun::StoreKind::Recording, at_step_1(), &image);
 
-        let route = classify(&msg, &Rules::default()).unwrap();
-        assert!(matches!(route, Route::Video { .. }), "{route:?}");
+        assert!(temporal(&msg, &Rules::default()).image_columns.is_some());
 
         let without_video = rules("[[rule]]\nentities = \"/robot/**\"\nvideo = false");
-        let route = classify(&msg, &without_video).unwrap();
-        assert!(matches!(route, Route::Latest { .. }), "{route:?}");
+        assert_eq!(temporal(&msg, &without_video).image_columns, None);
+    }
 
-        let with_opacity = log_msg(
-            rerun::StoreKind::Recording,
-            at_step_1(),
-            &image.with_opacity(0.5),
+    #[test]
+    fn images_with_other_components_are_still_video() {
+        let image = rerun::Image::from_color_model_and_bytes(
+            vec![0; 12],
+            [2, 2],
+            rerun::ColorModel::RGB,
+            rerun::ChannelDatatype::U8,
+        )
+        .with_opacity(0.5);
+        let msg = log_msg(rerun::StoreKind::Recording, at_step_1(), &image);
+
+        let temporal = temporal(&msg, &Rules::default());
+        let image_columns = temporal.image_columns.unwrap();
+        assert_eq!(image_columns.len(), 2);
+        assert_eq!(temporal.chunk.components().len(), 3);
+        assert_eq!(
+            temporal
+                .chunk
+                .components_dropped(&image_columns)
+                .components()
+                .len(),
+            1,
+            "the opacity is left to travel as data"
         );
-        let route = classify(&with_opacity, &Rules::default()).unwrap();
-        assert!(matches!(route, Route::Latest { .. }), "{route:?}");
+    }
+
+    #[test]
+    fn rules_drop_components() {
+        let image = rerun::Image::from_color_model_and_bytes(
+            vec![0; 12],
+            [2, 2],
+            rerun::ColorModel::RGB,
+            rerun::ChannelDatatype::U8,
+        )
+        .with_opacity(0.5);
+        let msg = log_msg(rerun::StoreKind::Recording, at_step_1(), &image);
+
+        let without_opacity =
+            rules("[[rule]]\nentities = \"/robot/**\"\ndrop_components = [\"*:opacity\"]");
+        let temporal = temporal(&msg, &without_opacity);
+        assert!(!temporal.is_whole);
+        assert_eq!(temporal.chunk.components().len(), 2);
+
+        let without_anything =
+            rules("[[rule]]\nentities = \"/robot/**\"\ndrop_components = [\"Image:*\"]");
+        assert_eq!(classify(&msg, &without_anything).unwrap(), Route::Drop);
     }
 
     #[test]
@@ -279,21 +352,14 @@ mod tests {
 
         let guaranteed = rules("[[rule]]\nentities = \"/robot/**\"\ndelivery = \"guaranteed\"");
         assert_eq!(
-            classify(&scalar, &guaranteed).unwrap(),
-            Route::Guaranteed(Retention::None)
+            temporal(&scalar, &guaranteed).delivery,
+            Delivery::Guaranteed
         );
 
+        let latched = rules("[[rule]]\nentities = \"/robot/**\"\ndelivery = \"latched\"");
+        assert_eq!(temporal(&scalar, &latched).delivery, Delivery::Latched);
+
         let limited = rules("[[rule]]\nentities = \"/robot/**\"\nmax_hz = 5");
-        let route = classify(&scalar, &limited).unwrap();
-        assert!(
-            matches!(
-                route,
-                Route::Latest {
-                    max_hz: Some(5.0),
-                    ..
-                }
-            ),
-            "{route:?}"
-        );
+        assert_eq!(temporal(&scalar, &limited).max_hz, Some(5.0));
     }
 }

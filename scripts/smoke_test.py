@@ -48,7 +48,19 @@ JPEG_SIZE = (640, 480)
 MAX_FRAMES_LOST = 40
 
 STATIC_ENTITIES = {"/world/box", "/world/points", "/__properties"}
-TEMPORAL_ENTITIES = {"/world/robot", "/signal", "/camera/image", "/camera/jpeg", "/log"}
+LATCHED_ENTITIES = {"/latched"}
+TEMPORAL_ENTITIES = {"/world/robot", "/signal", "/camera/image", "/camera/jpeg", "/log"} | LATCHED_ENTITIES
+
+# What the robot side is told to do with the app's data.
+RULES = """
+[[rule]]
+entities = "/latched"
+delivery = "latched"
+
+[[rule]]
+entities = "/camera/**"
+drop_components = ["*:draw_order"]
+"""
 
 
 class Processes:
@@ -111,6 +123,9 @@ def log_app() -> str:
     rec.log("world/box", rr.Boxes3D(half_sizes=[1, 1, 1]), static=True)
     rec.log("world/points", rr.Points3D(np.random.rand(100, 3)), static=True)
 
+    rec.set_time("step", sequence=0)
+    rec.log("latched", rr.Scalars(1.0))
+
     for step in range(NUM_STEPS):
         rec.set_time("step", sequence=step)
         rec.log("world/robot", rr.Transform3D(translation=[np.sin(step / 10), 0, 0]))
@@ -119,7 +134,8 @@ def log_app() -> str:
         width, height = IMAGE_SIZE
         image = np.zeros((height, width, 3), dtype=np.uint8)
         image[:, stripe_column(step, width)] = 255
-        rec.log("camera/image", rr.Image(image))
+        # The opacity has to travel next to the video frame, and the rules drop the draw order.
+        rec.log("camera/image", rr.Image(image, opacity=0.5, draw_order=1.0))
 
         width, height = JPEG_SIZE
         image = np.zeros((height, width, 3), dtype=np.uint8)
@@ -162,8 +178,13 @@ def check_stream(rrd: Path, recording_id: str) -> None:
         missing = sorted(set(range(NUM_STEPS)) - {row["step"] for row in rows[entity]})
         check(not missing, f"all {NUM_STEPS} rows of {entity} arrived (missing steps: {missing})")
     check(len(rows["/log"]) == 1, "the text log arrived")
+    check(len(rows["/latched"]) == 1, "the latched message arrived")
 
-    images = rows["/camera/image"]
+    camera_rows = rows["/camera/image"]
+    images = [row for row in camera_rows if row.get("Image:buffer") is not None]
+    opacities = [row for row in camera_rows if row.get("Image:opacity") is not None]
+    check(len(opacities) == NUM_STEPS, f"all {NUM_STEPS} opacities arrived next to the video frames")
+    check(not any("Image:draw_order" in row for row in camera_rows), "the dropped component did not arrive")
     check(NUM_STEPS - MAX_FRAMES_LOST <= len(images), f"{len(images)} of {NUM_STEPS} images arrived")
     width, height = IMAGE_SIZE
     for row in images:
@@ -192,7 +213,8 @@ def check_late_join(rrd: Path) -> None:
     check(len(rr.chunk.RrdReader(rrd).blueprints()) == 1, "a late joiner gets the blueprint")
     rows = read_rows(rrd)
     check(STATIC_ENTITIES <= set(rows), "a late joiner gets the static data")
-    late_temporal = TEMPORAL_ENTITIES & set(rows)
+    check(LATCHED_ENTITIES <= set(rows), "a late joiner gets the latched data")
+    late_temporal = (TEMPORAL_ENTITIES - LATCHED_ENTITIES) & set(rows)
     check(not late_temporal, f"a late joiner gets no old temporal data: {sorted(late_temporal)}")
 
 
@@ -262,7 +284,20 @@ def run(processes: Processes, temp: Path) -> None:
     processes.start("robot_proxy", "rerun", "--serve-grpc", "--port", ROBOT_PROXY_PORT)
     viewer = processes.start("viewer", "rerun", "--headless", "--port", OPERATOR_PORT, "--save", operator_rrd)
     time.sleep(3)
-    processes.start("robot", BRIDGE, "robot", "--proxy", proxy_url(ROBOT_PROXY_PORT))
+    rules = temp / "rules.toml"
+    rules.write_text(RULES)
+    # Above the app's 20 Hz: LiveKit's default for images this small is 15 frames per second.
+    processes.start(
+        "robot",
+        BRIDGE,
+        "robot",
+        "--proxy",
+        proxy_url(ROBOT_PROXY_PORT),
+        "--rules",
+        rules,
+        "--video-max-framerate-hz",
+        "30",
+    )
     operator = processes.start("operator", BRIDGE, "operator", "--viewer", proxy_url(OPERATOR_PORT))
     time.sleep(4)
 

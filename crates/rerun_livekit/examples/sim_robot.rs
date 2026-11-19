@@ -9,9 +9,12 @@
 
 use std::f32::consts::FRAC_PI_2;
 use std::ops::Range;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::Parser as _;
+use rerun::log::ChunkBatcherConfig;
+use rerun::sink::{FileSink, GrpcSink};
 use rerun_livekit::RoomArgs;
 use rerun_livekit::control::receive_commands;
 
@@ -32,6 +35,10 @@ struct Args {
     /// Rerun proxy to log to: a viewer, or `rerun --serve-grpc`.
     #[arg(long, default_value = "rerun+http://127.0.0.1:9876/proxy")]
     proxy: String,
+
+    /// Also write the recording to this `.rrd` file.
+    #[arg(long)]
+    save: Option<PathBuf>,
 
     #[command(flatten)]
     room: RoomArgs,
@@ -85,8 +92,14 @@ async fn main() -> anyhow::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let args = Args::parse();
 
-    let rec = rerun::RecordingStreamBuilder::new("rerun_example_livekit_sim_robot")
-        .connect_grpc_opts(args.proxy)?;
+    let builder = rerun::RecordingStreamBuilder::new("rerun_example_livekit_sim_robot");
+    let rec = match args.save {
+        None => builder.connect_grpc_opts(args.proxy)?,
+        Some(path) => builder
+            // With a file sink the stream would otherwise flush at the file's slower rate.
+            .batcher_config(ChunkBatcherConfig::LOW_LATENCY)
+            .set_sinks((GrpcSink::new(args.proxy.parse()?), FileSink::new(path)?))?,
+    };
     let command = receive_commands(args.room, WATCHDOG_TIMEOUT);
 
     rec.log_static(

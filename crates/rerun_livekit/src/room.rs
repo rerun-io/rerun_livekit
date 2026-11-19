@@ -122,6 +122,8 @@ impl RoomArgs {
         let mut options = RoomOptions::default();
         // Only the operator shows the robot's video. Nobody else should pay to receive it.
         options.auto_subscribe = role == Role::Operator;
+        // Pause the simulcast layers of the robot's video that no operator is receiving.
+        options.dynacast = role == Role::Robot;
         Room::connect(url, &token, options)
             .await
             .with_context(|| format!("Failed to join room {room:?} as {identity:?} at {url}"))
