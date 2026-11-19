@@ -1,0 +1,24 @@
+direction: right
+
+robot: Robot {
+  app: "Your app\n(any Rerun SDK)"
+  proxy: "Rerun proxy\n(the viewer, or rerun --serve-grpc)"
+  bridge: rerun-livekit robot
+  control: Your robot code
+
+  app -> proxy: gRPC
+  proxy -> bridge: gRPC
+}
+
+livekit: LiveKit room {shape: circle}
+
+operator: Operator {
+  bridge: rerun-livekit operator
+  viewer: Rerun viewer
+  input: Your operator input
+
+  bridge -> viewer: gRPC
+}
+
+robot.bridge -> livekit -> operator.bridge: video and data
+robot.control <- livekit <- operator.input: commands {style.stroke-dash: 4}

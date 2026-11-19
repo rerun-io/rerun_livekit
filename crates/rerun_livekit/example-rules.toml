@@ -33,3 +33,15 @@ max_hz = 5
 [[rule]]
 entities = "/mission/**"
 delivery = "guaranteed"
+
+# Sent once, and everyone needs it, including operators who join later: a latched ROS topic.
+[[rule]]
+entities = "/tf_static"
+delivery = "latched"
+
+# Leave out components the operator does not need. `*` stands for any text.
+# Here: the original ROS message that a recorder stores next to each image it converted,
+# which would send every image a second time.
+[[rule]]
+entities = "/**"
+drop_components = ["sensor_msgs.msg.CompressedImage:message", "sensor_msgs.msg.Image:message"]
