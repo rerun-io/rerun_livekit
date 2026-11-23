@@ -48,7 +48,7 @@ Start the robot side:
 ```sh
 rerun --serve-grpc --port 9876                  # the proxy the app logs to
 cargo run --release -- robot --commands-to-udp 127.0.0.1:9870
-pixi run mujoco-robot                           # a simulated humanoid, in place of your app
+pixi run mujoco-robot --save episode.rrd        # a simulated humanoid, in place of your app
 ```
 
 Start the operator side:
@@ -190,12 +190,15 @@ They also keep the same entity paths, so registered as they are, the two copies 
 [`register_episode.py`](examples/register_episode.py) registers the robot's file as the `robot` layer.
 From the operator's file it builds the `operator` layer, which holds what only the operator's end knows: the images that reached it, moved below `/operator`, and the latency plots.
 
+Stop the robot side and the operator side first.
+While the proxy is running on Rerun's default port, `rerun` sends what it is asked to open there, and no new Viewer starts.
+
 ```sh
 rerun server                                         # a local catalog
 pixi run register-episode episode.rrd operator.rrd
 ```
 
-Open the address it prints to see the robot's camera next to the operator's view, above the latency of every frame.
+Open the address that `register-episode` prints to see the robot's camera next to the operator's view, above the latency of every frame.
 The operator's images keep the time the robot logged them at, so the two views show the same moment and the latency plot shows how much later the operator saw it.
 The local catalog keeps its datasets in memory, so register the episodes again after restarting it.
 
