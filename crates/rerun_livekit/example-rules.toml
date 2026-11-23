@@ -19,6 +19,7 @@ entities = "/camera/wrist/**"
 max_hz = 10
 
 # Send this depth-aligned image unchanged instead of as lossy video.
+# `video = true` does the opposite when the robot side runs with `--video false`.
 [[rule]]
 entities = "/camera/front/aligned"
 video = false

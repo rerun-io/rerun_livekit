@@ -1,20 +1,19 @@
 # Pixi is a package management tool for developers.
-# Before running a task, pixi ensures that all listed dependencies are installed first.echop
+# Before running a task, pixi ensures that all listed dependencies are installed first.
 #
-# Pixi is not required for rerun, but it is a convenient way to install the
-# dependencies required for this example.
+# Pixi is not required to build or run the bridge. It installs the linters that CI runs.
 #
 # https://pixi.sh/latest/
 #
 # Use `pixi task list` to list the available tasks,
-# and `pixi run TASK` to run it (e.g. `pixi run example`).
+# and `pixi run TASK` to run it (e.g. `pixi run py-fmt`).
 
-[project]
+[workspace]
 name = "rerun_livekit"
 authors = ["rerun.io <opensource@rerun.io>"]
 channels = ["conda-forge"]
-description = "rerun_livekit"
-homepage = "https://rerun.io"
+description = "Bridge any Rerun stream through LiveKit"
+homepage = "https://github.com/rerun-io/rerun_livekit"
 license = "MIT OR Apache-2.0"
 
 platforms = ["linux-64", "linux-aarch64", "osx-arm64", "osx-64", "win-64"]

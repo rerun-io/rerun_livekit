@@ -4,8 +4,8 @@
 //! The Rerun side is the stock SDK. It knows nothing about LiveKit.
 //!
 //! A command is whatever bytes the robot and its driver agree on. This robot takes what
-//! `keyboard_teleop` sends: a forward speed in m/s and a turn rate in rad/s, as two
-//! little-endian `f32`.
+//! `keyboard_teleop` sends: a forward speed and a speed to the left in m/s and a turn rate in
+//! rad/s, as three little-endian `f32`.
 
 use std::f32::consts::FRAC_PI_2;
 use std::ops::Range;
@@ -89,7 +89,7 @@ struct Pose {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    rerun_livekit::init_logging(log::LevelFilter::Info);
     let args = Args::parse();
 
     let builder = rerun::RecordingStreamBuilder::new("rerun_example_livekit_sim_robot");
@@ -143,16 +143,21 @@ async fn main() -> anyhow::Result<()> {
     for step in 0_u32.. {
         tick.tick().await;
         // No command, or one this robot does not understand, means stop.
-        let (forward, turn) = command
+        let Command {
+            forward,
+            left,
+            turn,
+        } = command
             .borrow()
             .as_deref()
-            .and_then(decode_command)
-            .unwrap_or((0.0, 0.0));
+            .and_then(Command::decode)
+            .unwrap_or_default();
 
         let dt = STEP.as_secs_f32();
+        let (sin, cos) = pose.yaw.sin_cos();
         pose.yaw += turn * dt;
-        pose.position[0] += forward * pose.yaw.cos() * dt;
-        pose.position[1] += forward * pose.yaw.sin() * dt;
+        pose.position[0] += (forward * cos - left * sin) * dt;
+        pose.position[1] += (forward * sin + left * cos) * dt;
 
         rec.set_duration_secs("sim_time", f64::from(step) * STEP.as_secs_f64());
         rec.log(
@@ -169,6 +174,7 @@ async fn main() -> anyhow::Result<()> {
             "command/forward",
             &rerun::Scalars::single(f64::from(forward)),
         )?;
+        rec.log("command/left", &rerun::Scalars::single(f64::from(left)))?;
         rec.log("command/turn", &rerun::Scalars::single(f64::from(turn)))?;
         rec.log(
             "world/robot/camera",
@@ -181,12 +187,30 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Reads the forward speed and turn rate that `keyboard_teleop` sends.
-fn decode_command(bytes: &[u8]) -> Option<(f32, f32)> {
-    let ([forward, turn], []) = bytes.as_chunks::<4>() else {
-        return None;
-    };
-    Some((f32::from_le_bytes(*forward), f32::from_le_bytes(*turn)))
+/// What `keyboard_teleop` sends.
+#[derive(Default)]
+struct Command {
+    /// Speed along the robot's X axis, in m/s.
+    forward: f32,
+
+    /// Speed along the robot's Y axis, in m/s.
+    left: f32,
+
+    /// Turn rate in rad/s, counter-clockwise.
+    turn: f32,
+}
+
+impl Command {
+    fn decode(bytes: &[u8]) -> Option<Self> {
+        let ([forward, left, turn], []) = bytes.as_chunks::<4>() else {
+            return None;
+        };
+        Some(Self {
+            forward: f32::from_le_bytes(*forward),
+            left: f32::from_le_bytes(*left),
+            turn: f32::from_le_bytes(*turn),
+        })
+    }
 }
 
 fn focal_length_px() -> f32 {

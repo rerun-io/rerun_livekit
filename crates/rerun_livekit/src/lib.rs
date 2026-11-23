@@ -7,6 +7,7 @@
 mod classify;
 pub mod control;
 mod latency;
+mod logging;
 pub mod operator;
 mod proxy;
 pub mod robot;
@@ -14,5 +15,6 @@ mod room;
 mod rules;
 mod video;
 
+pub use self::logging::init_logging;
 pub use self::room::{Role, RoomArgs};
 pub use self::video::VideoCodecArg;
