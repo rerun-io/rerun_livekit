@@ -34,7 +34,7 @@ LiveKit adds the server, the rooms and the SDKs around it.
 
 ## Try it out
 
-Install the [LiveKit server](https://docs.livekit.io/transport/self-hosting/local/) and the [Rerun Viewer](https://rerun.io/docs/getting-started/install-rerun).
+Install the [LiveKit server](https://docs.livekit.io/transport/self-hosting/local/), the [Rerun Viewer](https://rerun.io/docs/getting-started/install-rerun) and [pixi](https://pixi.sh), which installs what the simulated robot needs.
 Then run each command below in its own terminal, in this order.
 
 Start the room:
@@ -47,8 +47,8 @@ Start the robot side:
 
 ```sh
 rerun --serve-grpc --port 9876                  # the proxy the app logs to
-cargo run --release -- robot
-cargo run --release --example sim_robot         # a simulated robot, in place of your app
+cargo run --release -- robot --commands-to-udp 127.0.0.1:9870
+pixi run mujoco-robot                           # a simulated humanoid, in place of your app
 ```
 
 Start the operator side:
@@ -59,9 +59,14 @@ cargo run --release -- operator --viewer rerun+http://127.0.0.1:9877/proxy
 cargo run --release --example keyboard_teleop   # hold w/x, z/c or a/d to drive, q to quit
 ```
 
-The Viewer shows the simulated robot, its camera, and the commands it receives.
+The Viewer shows a humanoid that walks where you steer it, what its head camera sees, and how closely it follows your commands.
+The robot is a [Unitree G1](https://github.com/google-deepmind/mujoco_menagerie/tree/main/unitree_g1) in [MuJoCo](https://mujoco.org), walking with a policy from [MuJoCo Playground](https://playground.mujoco.org).
+The policy was not trained to stand still, so with no key held the robot steps in place and drifts.
+One run of the robot is one episode, which ends when you stop it or it falls over.
+Its first run downloads the model and the policy.
+On Linux without a display, set `MUJOCO_GL=egl`.
 
-To bridge your own app instead of `sim_robot`, log to `rerun+http://127.0.0.1:9876/proxy`, which is the default of `connect_grpc()`.
+To bridge your own app instead of [`mujoco_robot.py`](examples/mujoco_robot.py), log to `rerun+http://127.0.0.1:9876/proxy`, which is the default of `connect_grpc()`.
 Start it after `rerun-livekit robot`, or its first seconds of data are skipped as too old.
 
 To use two machines, run the robot side on the robot and the operator side on the operator's machine.
@@ -159,22 +164,15 @@ Raise the limits with `--video-max-framerate-hz` and `--video-max-bitrate-bps`, 
 Record on both ends.
 The robot's copy is the full data.
 The operator's copy is what the operator saw, with lossy video and missing messages.
-Both keep the same recording id, so you can register them as two layers of one segment in a Rerun catalog and compare them:
-
-```python
-dataset.register([robot_rrd_uri], layer_name="robot")
-dataset.register([operator_rrd_uri], layer_name="operator")
-```
 
 On the robot, the app can write a file and feed the bridge from one stream:
 
-```rust
-let rec = rerun::RecordingStreamBuilder::new("rerun_example_my_robot")
-    .batcher_config(ChunkBatcherConfig::LOW_LATENCY)
-    .set_sinks((GrpcSink::new(proxy_uri), FileSink::new("episode.rrd")?))?;
+```python
+rec = rr.RecordingStream("rerun_example_my_robot", batcher_config=rr.ChunkBatcherConfig.LOW_LATENCY())
+rec.set_sinks(rr.GrpcSink(proxy_url), rr.FileSink("episode.rrd"))
 ```
 
-`sim_robot --save episode.rrd` does this.
+`pixi run mujoco-robot --save episode.rrd` does this.
 Set the batcher config, or the file sink slows flushing from 8 ms to 200 ms for both sinks.
 The two sinks share one queue, so if the proxy stops accepting data, the file stops growing too.
 
@@ -182,8 +180,24 @@ On the operator side, save from the Viewer, or run a second operator that writes
 
 ```sh
 rerun --save operator.rrd --port 9878
-cargo run --release -- operator --identity recorder --viewer rerun+http://127.0.0.1:9878/proxy
+cargo run --release -- operator --identity recorder --plot-latency --viewer rerun+http://127.0.0.1:9878/proxy
 ```
+
+### Both ends in one segment
+
+Both copies keep the same recording id, so they can be two layers of one segment in a Rerun catalog.
+They also keep the same entity paths, so registered as they are, the two copies of an entity merge into one and can no longer be told apart.
+[`register_episode.py`](examples/register_episode.py) registers the robot's file as the `robot` layer.
+From the operator's file it builds the `operator` layer, which holds what only the operator's end knows: the images that reached it, moved below `/operator`, and the latency plots.
+
+```sh
+rerun server                                         # a local catalog
+pixi run register-episode episode.rrd operator.rrd
+```
+
+Open the address it prints to see the robot's camera next to the operator's view, above the latency of every frame.
+The operator's images keep the time the robot logged them at, so the two views show the same moment and the latency plot shows how much later the operator saw it.
+The local catalog keeps its datasets in memory, so register the episodes again after restarting it.
 
 ## Send commands to the robot
 
@@ -221,12 +235,20 @@ loop {
 }
 ```
 
-Three examples show it working:
+A robot stack that is not written in Rust gets the commands over UDP instead:
+
+```sh
+rerun-livekit robot --commands-to-udp 127.0.0.1:9870
+```
+
+This sends the command the robot should follow right now to that address, about 30 times a second, as the bytes the driver sent.
+An empty datagram means stop.
+The receiver must also stop when datagrams stop arriving.
+
+Two examples show it working:
 
 - [`keyboard_teleop`](crates/rerun_livekit/examples/keyboard_teleop.rs) sends a forward speed, a speed to the left and a turn rate, as three little-endian `f32`.
-- [`sim_robot`](crates/rerun_livekit/examples/sim_robot.rs) follows them.
-- [`command_to_udp`](crates/rerun_livekit/examples/command_to_udp.rs) passes commands on as UDP datagrams, for a robot stack that is not written in Rust.
-  An empty datagram means stop.
+- [`mujoco_robot.py`](examples/mujoco_robot.py) reads them from UDP and walks that way.
 
 ## Limits
 

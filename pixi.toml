@@ -1,7 +1,8 @@
 # Pixi is a package management tool for developers.
 # Before running a task, pixi ensures that all listed dependencies are installed first.
 #
-# Pixi is not required to build or run the bridge. It installs the linters that CI runs.
+# Pixi is not required to build or run the bridge. It installs the linters that CI runs,
+# and the `examples` environment that the MuJoCo robot and the smoke test run in.
 #
 # https://pixi.sh/latest/
 #
@@ -52,3 +53,30 @@ sysroot_linux-64 = ">=2.17,<3" # rustc 1.64+ requires glibc 2.17+, see https://b
 
 [target.linux-aarch64.dependencies]
 sysroot_linux-aarch64 = ">=2.17,<3" # rustc 1.64+ requires glibc 2.17+, see https://blog.rust-lang.org/2022/08/01/Increasing-glibc-kernel-requirements.html
+
+# ------------------------------------------------------------------------------------------
+# The Python that `examples/mujoco_robot.py` and `scripts/smoke_test.py` run in.
+
+[feature.examples]
+# `rerun-sdk` and `onnxruntime` publish no wheels for osx-64.
+platforms = ["linux-64", "linux-aarch64", "osx-arm64", "win-64"]
+
+[feature.examples.dependencies]
+python = "3.12.*"
+
+[feature.examples.pypi-dependencies]
+mujoco = ">=3.3.5,<4" # The G1 model's contact sensors need 3.3.5.
+numpy = "*"
+onnxruntime = "*"
+pillow = "*"
+# TODO(isaac): 0.44. The MJCF importer is not in a release yet, so this is the build of
+# rerun-io/reality `888fdaf` (rerun-io/rerun `27af7f3`).
+rerun-sdk = { version = "==0.44.0a1+dev", index = "https://build.rerun.io/commit/888fdaf/simple", extras = ["catalog"] }
+
+[feature.examples.tasks]
+mujoco-robot = "python examples/mujoco_robot.py"
+register-episode = "python examples/register_episode.py"
+smoke-test = "python scripts/smoke_test.py"
+
+[environments]
+examples = { features = ["examples"], no-default-feature = true }

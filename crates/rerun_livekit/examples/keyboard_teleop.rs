@@ -3,9 +3,9 @@
 //! The robot moves while a key is held and stops when it is let go.
 //!
 //! The command here is a forward speed and a speed to the left in m/s and a turn rate in
-//! rad/s, as three little-endian `f32`, which is what `sim_robot` reads. [`Driver::send`] takes
-//! any bytes: to send something else (a gamepad state, joint targets, a controller pose),
-//! encode it and send it the same way.
+//! rad/s, as three little-endian `f32`, which is what `mujoco_robot.py` reads.
+//! [`Driver::send`] takes any bytes: to send something else (a gamepad state, joint targets,
+//! a controller pose), encode it and send it the same way.
 
 use std::io::stdout;
 use std::time::{Duration, Instant};

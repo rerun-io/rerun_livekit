@@ -78,6 +78,9 @@ exclude = [
   'https://github.com/rerun-io/rerun/commit/\.*', # Ignore links to our own commits (typically in changelog).
   'https://github.com/rerun-io/rerun/pull/\.*',   # Ignore links to our own pull requests (typically in changelog).
 
+  # Base URLs that `examples/mujoco_robot.py` appends file names to.
+  'https://raw.githubusercontent.com/google-deepmind/mujoco_',
+
   # Used in rerun_template repo until the user search-replaces `rerun_livekit`
   'https://github.com/rerun-io/rerun_livekit',
 ]

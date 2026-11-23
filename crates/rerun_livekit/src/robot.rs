@@ -2,6 +2,7 @@
 
 use std::collections::VecDeque;
 use std::convert::Infallible;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -20,6 +21,7 @@ use rerun::log::Chunk;
 use tokio::sync::mpsc;
 
 use crate::classify::{Retention, Route, StreamKey, Temporal, classify};
+use crate::control::send_commands_to_udp;
 use crate::room::{LATEST_TRACK, LOG_TOPIC, LatestFrame, Role, RoomArgs};
 use crate::rules::{Delivery, Rules, Video};
 use crate::video::{EncoderLimits, Sent, TRACK_INFO_TOPIC, VideoCodecArg, VideoPublisher};
@@ -74,8 +76,26 @@ pub struct RobotArgs {
     #[arg(long, default_value_t = 256 * 1024 * 1024)]
     replay_limit_bytes: usize,
 
+    /// Send the driver's commands to this UDP address, as the bytes the driver sent, for a
+    /// robot stack that is not written in Rust. An empty datagram means stop.
+    #[arg(long)]
+    commands_to_udp: Option<SocketAddr>,
+
     #[command(flatten)]
     room: RoomArgs,
+}
+
+/// Starts sending the driver's commands to `--commands-to-udp`, if that is set.
+///
+/// Call it once. It keeps running across sessions.
+///
+/// # Errors
+/// If the UDP socket cannot be opened.
+pub fn start_command_forwarding(args: &RobotArgs) -> anyhow::Result<()> {
+    let Some(to) = args.commands_to_udp else {
+        return Ok(());
+    };
+    send_commands_to_udp(args.room.clone().with_identity_suffix("-control"), to)
 }
 
 /// Runs one session, which lasts until the proxy or the room goes away.

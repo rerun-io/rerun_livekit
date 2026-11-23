@@ -6,8 +6,8 @@ Starts a LiveKit dev server, Rerun proxies and viewers, and both sides of the br
 that what an app logs on the robot side arrives on the operator side, that a late joiner gets
 the scene, and that the control lease behaves.
 
-Needs `livekit-server` and `rerun` on the PATH, and Python with `rerun-sdk` and Pillow.
-Run it from anywhere: `python scripts/smoke_test.py`. It exits non-zero on the first failure.
+Needs `livekit-server` on the PATH. Run it with `pixi run smoke-test`, which brings `rerun` and
+Python with `rerun-sdk` and Pillow. It exits non-zero on the first failure.
 """
 
 from __future__ import annotations
@@ -17,6 +17,8 @@ import os
 import pty
 import select
 import signal
+import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -31,13 +33,13 @@ from PIL import Image
 
 REPO = Path(__file__).resolve().parent.parent
 BRIDGE = REPO / "target/release/rerun-livekit"
-SIM_ROBOT = REPO / "target/release/examples/sim_robot"
 KEYBOARD_TELEOP = REPO / "target/release/examples/keyboard_teleop"
 
 # Away from Rerun's default port, so a viewer that is already open is left alone.
 ROBOT_PROXY_PORT = 19876
 OPERATOR_PORT = 19877
 LATE_OPERATOR_PORT = 19878
+COMMAND_PORT = 19870
 
 NUM_STEPS = 150
 STEP_SECS = 0.05
@@ -239,10 +241,31 @@ def read_terminal(terminal: int, secs: float) -> str:
     return output.decode(errors="replace")
 
 
+def newest_command(commands: socket.socket) -> bytes:
+    """The last datagram that `--commands-to-udp` sent."""
+    newest = None
+    while True:
+        try:
+            newest = commands.recv(64)
+        except BlockingIOError:
+            break
+    if newest is None:
+        sys.exit("FAILED: no command arrived over UDP")
+    return newest
+
+
 def check_control() -> None:
+    commands = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    commands.bind(("127.0.0.1", COMMAND_PORT))
+    commands.setblocking(False)
+
     alice, alice_terminal = start_driver("alice")
     check("You are driving" in read_terminal(alice_terminal, 5), "the first driver gets the lease")
-    os.write(alice_terminal, b"ww")
+    # One press counts as held for 700 ms. A second one would be a repeat, which is let go sooner.
+    os.write(alice_terminal, b"w")
+    time.sleep(0.3)
+    forward, _left, _turn = struct.unpack("<3f", newest_command(commands))
+    check(forward > 0, "the driver's command arrives over UDP")
 
     bob, bob_terminal = start_driver("bob")
     check("is driving" in read_terminal(bob_terminal, 5), "a second driver is refused while the first drives")
@@ -251,6 +274,7 @@ def check_control() -> None:
     os.kill(alice, signal.SIGKILL)
     os.waitpid(alice, 0)
     time.sleep(1)
+    check(newest_command(commands) == b"", "an empty datagram says stop after the driver dies")
     carol, carol_terminal = start_driver("carol")
     check("You are driving" in read_terminal(carol_terminal, 5), "another driver takes over after the first one dies")
     os.write(carol_terminal, b"q")
@@ -297,6 +321,8 @@ def run(processes: Processes, temp: Path) -> None:
         rules,
         "--video-max-framerate-hz",
         "30",
+        "--commands-to-udp",
+        f"127.0.0.1:{COMMAND_PORT}",
     )
     operator = processes.start("operator", BRIDGE, "operator", "--viewer", proxy_url(OPERATOR_PORT))
     time.sleep(4)
@@ -322,8 +348,6 @@ def run(processes: Processes, temp: Path) -> None:
     check_late_join(late_rrd)
 
     print("Control")
-    processes.start("sim_robot", SIM_ROBOT, "--proxy", proxy_url(ROBOT_PROXY_PORT))
-    time.sleep(4)
     check_control()
 
 

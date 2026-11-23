@@ -89,6 +89,15 @@ pub struct RoomArgs {
 }
 
 impl RoomArgs {
+    /// The same room for another participant of this process, which needs its own identity.
+    #[must_use]
+    pub fn with_identity_suffix(mut self, suffix: &str) -> Self {
+        if let Some(identity) = &mut self.identity {
+            identity.push_str(suffix);
+        }
+        self
+    }
+
     /// Joins the room with a locally minted token.
     ///
     /// # Errors

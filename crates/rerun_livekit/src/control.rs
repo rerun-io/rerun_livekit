@@ -11,6 +11,7 @@
 //!   the lease, so a driver that crashed does not lock everyone else out.
 
 use std::collections::HashMap;
+use std::net::{SocketAddr, UdpSocket};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -42,6 +43,12 @@ const LEASE_HELD_ERROR: u32 = 1;
 
 /// How long the robot waits before it starts a new session after losing the room.
 const RETRY_DELAY: Duration = Duration::from_secs(2);
+
+/// How often [`send_commands_to_udp`] sends the current command.
+const UDP_SEND_INTERVAL: Duration = Duration::from_millis(33);
+
+/// [`send_commands_to_udp`] tells the robot to stop when commands stop arriving for this long.
+const UDP_WATCHDOG_TIMEOUT: Duration = Duration::from_millis(300);
 
 /// What a driver sends, many times a second.
 #[derive(Clone, PartialEq, prost::Message)]
@@ -92,6 +99,32 @@ pub fn receive_commands(
         }
     });
     current_rx
+}
+
+/// Joins the room and hands the commands to a robot stack that is not written in Rust.
+///
+/// Sends the command the robot should follow right now to `to`, at a fixed rate, as the bytes
+/// the driver sent. An empty datagram means stop: nobody is driving, or the driver's commands
+/// stopped arriving. The receiver must also stop when datagrams stop, which covers this
+/// program dying.
+///
+/// # Errors
+/// If the UDP socket cannot be opened.
+pub fn send_commands_to_udp(room: RoomArgs, to: SocketAddr) -> anyhow::Result<()> {
+    let socket = UdpSocket::bind("0.0.0.0:0").context("Failed to open a UDP socket")?;
+    let command = receive_commands(room, UDP_WATCHDOG_TIMEOUT);
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(UDP_SEND_INTERVAL);
+        loop {
+            tick.tick().await;
+            let datagram = command.borrow().clone().unwrap_or_default();
+            // Nothing listening is not fatal: the robot stack may start after this program.
+            if let Err(err) = socket.send_to(&datagram, to) {
+                log::debug!("Failed to send the command to {to}: {err}");
+            }
+        }
+    });
+    Ok(())
 }
 
 async fn receive_session(
