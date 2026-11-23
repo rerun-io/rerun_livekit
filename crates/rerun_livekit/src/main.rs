@@ -31,6 +31,10 @@ async fn main() -> anyhow::Result<()> {
             .map_err(|err| anyhow::anyhow!("Failed to turn off the playout delay: {err}"))?;
     }
 
+    if let Command::Robot(args) = &command {
+        robot::start_command_forwarding(args)?;
+    }
+
     let run = async {
         match command {
             Command::Robot(args) => retry(|| robot::run_session(&args)).await,

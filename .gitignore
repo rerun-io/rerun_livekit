@@ -24,3 +24,10 @@ __pycache__
 .ruff_cache
 *.egg-info
 venv
+
+# The model that `examples/mujoco_robot.py` downloads
+examples/g1
+
+# Recordings, and the blueprint that `examples/register_episode.py` writes
+*.rrd
+*.rbl
