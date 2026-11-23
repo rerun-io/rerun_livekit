@@ -21,7 +21,7 @@ use tokio::sync::mpsc;
 
 use crate::classify::{Retention, Route, StreamKey, Temporal, classify};
 use crate::room::{LATEST_TRACK, LOG_TOPIC, LatestFrame, Role, RoomArgs};
-use crate::rules::{Delivery, Rules};
+use crate::rules::{Delivery, Rules, Video};
 use crate::video::{EncoderLimits, Sent, TRACK_INFO_TOPIC, VideoCodecArg, VideoPublisher};
 
 /// The largest message the latest lane can carry.
@@ -51,6 +51,11 @@ pub struct RobotArgs {
     #[arg(long, default_value_t = 1000)]
     max_age_millis: u64,
 
+    /// Send images as video. With `false` they travel unchanged, as data, except where a rule
+    /// sets `video = true`.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    video: bool,
+
     /// Codec of the video tracks that carry images.
     #[arg(long, value_enum, default_value_t = VideoCodecArg::H264)]
     video_codec: VideoCodecArg,
@@ -78,9 +83,10 @@ pub struct RobotArgs {
 /// # Errors
 /// Always, with what ended the session.
 pub async fn run_session(args: &RobotArgs) -> anyhow::Result<Infallible> {
+    let default_video = Video::from(args.video);
     let rules = match &args.rules {
-        Some(path) => Rules::load(path)?,
-        None => Rules::default(),
+        Some(path) => Rules::load(path, default_video)?,
+        None => Rules::new(default_video),
     };
     let (room, events) = args.room.connect(Role::Robot).await?;
     let result = forward(args, &rules, &room, events).await;

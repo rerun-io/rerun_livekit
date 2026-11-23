@@ -65,6 +65,7 @@ exclude = [
   'http://localhost',
   'recording:/',      # rrd recording link.
   'ws:/',
+  'wss:/',
   're_viewer.js',     # Build artifact that html is linking to.
 
   # Api endpoints.

@@ -1,8 +1,44 @@
-direction: right
+# The diagram at the top of the README. Render it through `bridge-light.d2` and
+# `bridge-dark.d2`, which set `ink`, the one color everything is drawn in.
+
+vars: {
+  d2-config: {
+    pad: 4
+  }
+}
+
+# No fills, so that the page shows through.
+style.fill: transparent
+***.style.fill: transparent
+***.style.stroke: ${ink}
+***.style.font-color: ${ink}
+(*** -> ***)[*].style.stroke: ${ink}
+(*** -> ***)[*].style.font-color: ${ink}
+
+classes: {
+  column: {
+    grid-columns: 1
+    vertical-gap: 44
+    style.font-size: 20
+  }
+
+  # Takes up a row without showing anything.
+  spacer: {
+    label: ""
+    style.opacity: 0
+  }
+}
+
+# The same height everywhere, so that the rows of the three columns line up.
+*.*.height: 52
+
+grid-columns: 3
+horizontal-gap: 56
 
 robot: Robot {
-  app: "Your app\n(any Rerun SDK)"
-  proxy: "Rerun proxy\n(the viewer, or rerun --serve-grpc)"
+  class: column
+  app: Your app
+  proxy: Rerun proxy
   bridge: rerun-livekit robot
   control: Your robot code
 
@@ -10,15 +46,23 @@ robot: Robot {
   proxy -> bridge: gRPC
 }
 
-livekit: LiveKit room {shape: circle}
+room: LiveKit room {
+  class: column
+  a.class: spacer
+  b.class: spacer
+  stream: Video and data
+  commands: Commands
+}
 
 operator: Operator {
+  class: column
+  a.class: spacer
+  viewer: Rerun Viewer
   bridge: rerun-livekit operator
-  viewer: Rerun viewer
-  input: Your operator input
+  input: Your input device
 
   bridge -> viewer: gRPC
 }
 
-robot.bridge -> livekit -> operator.bridge: video and data
-robot.control <- livekit <- operator.input: commands {style.stroke-dash: 4}
+robot.bridge -> room.stream -> operator.bridge
+operator.input -> room.commands -> robot.control: {style.stroke-dash: 4}

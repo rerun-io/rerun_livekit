@@ -217,7 +217,11 @@ mod tests {
     }
 
     fn rules(toml: &str) -> Rules {
-        Rules::parse(toml).unwrap()
+        Rules::parse(toml, Video::Allowed).unwrap()
+    }
+
+    fn no_rules() -> Rules {
+        Rules::new(Video::Allowed)
     }
 
     fn temporal(log_msg: &LogMsg, rules: &Rules) -> Temporal {
@@ -234,7 +238,7 @@ mod tests {
             at_step_1(),
             &rerun::Scalars::single(1.0),
         );
-        let temporal = temporal(&msg, &Rules::default());
+        let temporal = temporal(&msg, &no_rules());
         assert_eq!(temporal.delivery, Delivery::Latest);
         assert_eq!(temporal.max_hz, None);
         assert!(temporal.is_whole);
@@ -248,10 +252,7 @@ mod tests {
             at_step_1(),
             &rerun::TextLog::new("hi"),
         );
-        assert_eq!(
-            temporal(&msg, &Rules::default()).delivery,
-            Delivery::Guaranteed
-        );
+        assert_eq!(temporal(&msg, &no_rules()).delivery, Delivery::Guaranteed);
     }
 
     #[test]
@@ -288,10 +289,15 @@ mod tests {
         );
         let msg = log_msg(rerun::StoreKind::Recording, at_step_1(), &image);
 
-        assert!(temporal(&msg, &Rules::default()).image_columns.is_some());
+        assert!(temporal(&msg, &no_rules()).image_columns.is_some());
 
         let without_video = rules("[[rule]]\nentities = \"/robot/**\"\nvideo = false");
         assert_eq!(temporal(&msg, &without_video).image_columns, None);
+        assert_eq!(
+            temporal(&msg, &Rules::new(Video::Off)).image_columns,
+            None,
+            "video is off for everything"
+        );
     }
 
     #[test]
@@ -305,7 +311,7 @@ mod tests {
         .with_opacity(0.5);
         let msg = log_msg(rerun::StoreKind::Recording, at_step_1(), &image);
 
-        let temporal = temporal(&msg, &Rules::default());
+        let temporal = temporal(&msg, &no_rules());
         let image_columns = temporal.image_columns.unwrap();
         assert_eq!(image_columns.len(), 2);
         assert_eq!(temporal.chunk.components().len(), 3);

@@ -1,15 +1,15 @@
 [package]
 authors.workspace = true
-categories = []                                                      # TODO: fill in if you plan on publishing the crate
-description = "Carry any Rerun stream over a LiveKit room, for teleoperation"
+categories = ["network-programming", "science::robotics", "visualization"]
+description = "Bridge any Rerun stream through LiveKit, for remote live viewing and teleoperation"
 edition.workspace = true
 homepage.workspace = true
 include = ["LICENSE-APACHE", "LICENSE-MIT", "**/*.rs", "Cargo.toml"]
-keywords = []                                                        # TODO: fill in if you plan on publishing the crate
+keywords.workspace = true
 license.workspace = true
 name = "rerun_livekit"
-publish = false                                                      # TODO: set to `true` if you plan on publishing the crate
-readme = "README.md"
+publish = false
+readme = "../../README.md"
 repository.workspace = true
 rust-version.workspace = true
 version = "0.1.0"
@@ -20,10 +20,6 @@ workspace = true
 [package.metadata.docs.rs]
 all-features = true
 targets = ["x86_64-unknown-linux-gnu"]
-
-
-[features]
-default = []
 
 
 [[bin]]
