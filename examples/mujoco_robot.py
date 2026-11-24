@@ -135,9 +135,8 @@ def download(url: str, path: Path) -> None:
         path.write_bytes(response.read())
 
 
-def download_go2() -> None:
-    """Downloads the Go2 model from MuJoCo Menagerie and the policy from MuJoCo Playground."""
-    download(POLICY_URL, POLICY_ONNX)
+def download_model() -> None:
+    """Downloads the Go2 model from MuJoCo Menagerie."""
     for xml in (SCENE_XML, ROBOT_XML):
         download(f"{MENAGERIE_URL}/{xml.name}", xml)
     for mesh in sorted(set(re.findall(r'<mesh file="(\w+\.obj)"', ROBOT_XML.read_text(encoding="utf-8")))):
@@ -445,7 +444,8 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    download_go2()
+    download_model()
+    download(POLICY_URL, POLICY_ONNX)
 
     host, port = args.commands_from_udp.rsplit(":", 1)
     commands = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)

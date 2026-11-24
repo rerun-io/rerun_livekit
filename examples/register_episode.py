@@ -21,7 +21,7 @@ from pathlib import Path
 
 import rerun as rr
 import rerun.blueprint as rrb
-from mujoco_robot import SCENE_XML, download_go2, robot_view
+from mujoco_robot import SCENE_XML, download_model, robot_view
 from rerun.chunk import LazyChunkStream, RrdReader
 from rerun.mjcf import MjcfTree
 
@@ -85,7 +85,7 @@ def main() -> None:
     # Built before anything is registered, so that a failure leaves the dataset as it was.
     blueprint_rbl = None
     if dataset.default_blueprint() is None:
-        download_go2()
+        download_model()
         blueprint_rbl = args.operator_rrd.with_suffix(".rbl")
         blueprint(args.operator_prefix).save(args.dataset, blueprint_rbl)
 
