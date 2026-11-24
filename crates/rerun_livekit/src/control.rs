@@ -141,7 +141,7 @@ async fn receive_session(
     // The only copy of the lease. Granting or dropping it notifies `lease_rx`, so that the
     // room hears of it. Accepting a command does not.
     let lease_tx = watch::Sender::new(Leases::new());
-    let mut lease_rx = lease_tx.subscribe();
+    let announcer = tokio::spawn(announce_leases(local.clone(), lease_tx.subscribe()));
     register_lease_methods(&local, &lease_tx, watchdog_timeout, current_tx);
     log::info!("Waiting for a driver");
 
@@ -176,13 +176,6 @@ async fn receive_session(
                 }
             }
 
-            // The only place that announces the lease, always as it is now, so that the last
-            // announcement is the truth.
-            Ok(()) = lease_rx.changed() => {
-                let lease_id = lease_rx.borrow_and_update().current.as_ref().map(|lease| lease.id);
-                announce_lease(&local, lease_id).await;
-            }
-
             () = async { tokio::time::sleep_until(stop_at.unwrap_or_else(Instant::now)).await }, if stop_at.is_some() => {
                 if current_tx.send_replace(None).is_some() {
                     log::warn!("No command for {watchdog_timeout:?}, stopping");
@@ -190,6 +183,7 @@ async fn receive_session(
             }
         }
     };
+    announcer.abort();
     room.close().await.ok();
     result
 }
@@ -212,13 +206,24 @@ fn accept(
     Some(command.payload.clone())
 }
 
-/// Tells everyone in the room which lease is current, if any.
-async fn announce_lease(local: &LocalParticipant, lease_id: Option<u64>) {
-    // An empty value removes the attribute.
-    let value = lease_id.map(|id| id.to_string()).unwrap_or_default();
-    let attributes = HashMap::from([(LEASE_ATTRIBUTE.to_owned(), value)]);
-    if let Err(err) = local.set_attributes(attributes).await {
-        log::warn!("Failed to announce the lease: {err}");
+/// Tells everyone in the room which lease is current, every time it changes.
+///
+/// It is the only writer of [`LEASE_ATTRIBUTE`], and it always writes the lease as it is now,
+/// so the last announcement is the truth. It runs apart from the session loop, because an
+/// announcement can take seconds and the watchdog must not wait for it.
+async fn announce_leases(local: LocalParticipant, mut lease_rx: watch::Receiver<Leases>) {
+    while lease_rx.changed().await.is_ok() {
+        let lease_id = lease_rx
+            .borrow_and_update()
+            .current
+            .as_ref()
+            .map(|lease| lease.id);
+        // An empty value removes the attribute.
+        let value = lease_id.map(|id| id.to_string()).unwrap_or_default();
+        let attributes = HashMap::from([(LEASE_ATTRIBUTE.to_owned(), value)]);
+        if let Err(err) = local.set_attributes(attributes).await {
+            log::warn!("Failed to announce the lease: {err}");
+        }
     }
 }
 
