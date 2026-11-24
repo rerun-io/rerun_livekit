@@ -4,8 +4,8 @@ use std::convert::Infallible;
 
 use anyhow::Context as _;
 use futures_util::StreamExt as _;
-use livekit::StreamReader as _;
 use livekit::prelude::*;
+use livekit::{StreamError, StreamReader as _};
 use prost::Message as _;
 use re_protos::log_msg::v1alpha1::log_msg::Msg;
 use re_protos::log_msg::v1alpha1::{ArrowMsg, LogMsg};
@@ -93,10 +93,18 @@ async fn handle_room_events(
                     continue;
                 };
                 // Read to the end before taking the next event, so messages stay in order.
-                let bytes = reader
-                    .read_all()
-                    .await
-                    .context("Failed to receive a message from the room")?;
+                let bytes = match reader.read_all().await {
+                    Ok(bytes) => bytes,
+                    // The robot or this operator lost the room. When the robot sees this
+                    // operator again, it replays what a newcomer needs.
+                    Err(StreamError::AbnormalEnd(reason)) => {
+                        log::warn!("A message from the room was cut off: {reason}");
+                        continue;
+                    }
+                    Err(err) => {
+                        return Err(err).context("Failed to receive a message from the room");
+                    }
+                };
                 if topic == TRACK_INFO_TOPIC {
                     track_infos.insert(bytes)?;
                     continue;
