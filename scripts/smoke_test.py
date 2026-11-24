@@ -181,6 +181,7 @@ def check_stream(rrd: Path, recording_id: str) -> None:
         check(not missing, f"all {NUM_STEPS} rows of {entity} arrived (missing steps: {missing})")
     check(len(rows["/log"]) == 1, "the text log arrived")
     check(len(rows["/latched"]) == 1, "the latched message arrived")
+    check(all(len(rows[entity]) == 1 for entity in STATIC_ENTITIES), "the static data arrived once")
 
     camera_rows = rows["/camera/image"]
     images = [row for row in camera_rows if row.get("Image:buffer") is not None]
@@ -214,7 +215,7 @@ def check_stream(rrd: Path, recording_id: str) -> None:
 def check_late_join(rrd: Path) -> None:
     check(len(rr.chunk.RrdReader(rrd).blueprints()) == 1, "a late joiner gets the blueprint")
     rows = read_rows(rrd)
-    check(STATIC_ENTITIES <= set(rows), "a late joiner gets the static data")
+    check(all(len(rows.get(entity, [])) == 1 for entity in STATIC_ENTITIES), "a late joiner gets the static data once")
     check(LATCHED_ENTITIES <= set(rows), "a late joiner gets the latched data")
     late_temporal = (TEMPORAL_ENTITIES - LATCHED_ENTITIES) & set(rows)
     check(not late_temporal, f"a late joiner gets no old temporal data: {sorted(late_temporal)}")
@@ -261,7 +262,6 @@ def check_control() -> None:
 
     alice, alice_terminal = start_driver("alice")
     check("You are driving" in read_terminal(alice_terminal, 5), "the first driver gets the lease")
-    # One press counts as held for 700 ms. A second one would be a repeat, which is let go sooner.
     os.write(alice_terminal, b"w")
     time.sleep(0.3)
     forward, _left, _turn = struct.unpack("<3f", newest_command(commands))

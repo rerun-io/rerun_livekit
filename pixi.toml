@@ -65,7 +65,7 @@ platforms = ["linux-64", "linux-aarch64", "osx-arm64", "win-64"]
 python = "3.12.*"
 
 [feature.examples.pypi-dependencies]
-mujoco = ">=3.3.5,<4" # The G1 model's contact sensors need 3.3.5.
+mujoco = ">=3.5,<4" # `mj_multiRay` takes `normal` since 3.5.
 numpy = "*"
 onnxruntime = "*"
 pillow = "*"

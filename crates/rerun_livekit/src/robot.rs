@@ -10,6 +10,7 @@ use anyhow::Context as _;
 use bytes::Bytes;
 use futures_util::FutureExt as _;
 use livekit::SendByteOptions;
+use livekit::participant::ParticipantState;
 use livekit::prelude::*;
 use prost::Message as _;
 use re_protos::log_msg::v1alpha1::LogMsg;
@@ -150,8 +151,17 @@ async fn forward(
             },
         ),
         replay: ReplayCache::new(args.replay_limit_bytes),
+        operators: Vec::new(),
         guaranteed_tx,
     };
+    // An operator that is already active in the room causes no `ParticipantActive` event.
+    for participant in room.remote_participants().into_values() {
+        if Role::of(&participant) == Some(Role::Operator)
+            && participant.state() == ParticipantState::Active
+        {
+            router.add_operator(participant.identity());
+        }
+    }
     let mut report = tokio::time::interval(REPORT_INTERVAL);
 
     loop {
@@ -180,7 +190,10 @@ async fn forward(
                 RoomEvent::ParticipantActive(participant)
                     if Role::of(&participant) == Some(Role::Operator) =>
                 {
-                    router.replay_to(&participant.identity());
+                    router.add_operator(participant.identity());
+                }
+                RoomEvent::ParticipantDisconnected(participant) => {
+                    router.remove_operator(&participant.identity());
                 }
                 RoomEvent::Disconnected { reason } => {
                     anyhow::bail!("Disconnected from the room: {reason:?}");
@@ -209,6 +222,12 @@ struct Router<'a> {
     latest: LatestLane,
     video: VideoPublisher,
     replay: ReplayCache,
+
+    /// The operators that have been sent the replay.
+    ///
+    /// Guaranteed messages go to these only, so each operator gets a message once: in its
+    /// replay, or as it is sent.
+    operators: Vec<ParticipantIdentity>,
     guaranteed_tx: mpsc::UnboundedSender<Guaranteed>,
 }
 
@@ -300,27 +319,37 @@ impl Router<'_> {
     fn queue_guaranteed(&mut self, retention: Retention, topic: &'static str, bytes: Bytes) {
         let message = ByteStreamMessage { topic, bytes };
         self.replay.insert(retention, &message);
-        let destination = None;
+        self.queue_to(message, self.operators.clone());
+    }
+
+    fn queue_to(&self, message: ByteStreamMessage, destinations: Vec<ParticipantIdentity>) {
+        // LiveKit takes no destinations to mean everyone in the room.
+        if destinations.is_empty() {
+            return;
+        }
         self.guaranteed_tx
             .send(Guaranteed {
                 message,
-                destination,
+                destinations,
             })
             .ok();
     }
 
-    /// Sends a participant who just joined what it needs to catch up.
-    fn replay_to(&self, identity: &ParticipantIdentity) {
+    /// Sends an operator who just joined what it needs to catch up, and from then on every
+    /// guaranteed message.
+    fn add_operator(&mut self, identity: ParticipantIdentity) {
+        if self.operators.contains(&identity) {
+            return;
+        }
         log::info!("Replaying {} messages to {identity}", self.replay.len());
         for message in self.replay.iter() {
-            let destination = Some(identity.clone());
-            self.guaranteed_tx
-                .send(Guaranteed {
-                    message,
-                    destination,
-                })
-                .ok();
+            self.queue_to(message, vec![identity.clone()]);
         }
+        self.operators.push(identity);
+    }
+
+    fn remove_operator(&mut self, identity: &ParticipantIdentity) {
+        self.operators.retain(|operator| operator != identity);
     }
 }
 
@@ -349,8 +378,8 @@ struct ByteStreamMessage {
 struct Guaranteed {
     message: ByteStreamMessage,
 
-    /// `None` sends to everyone in the room.
-    destination: Option<ParticipantIdentity>,
+    /// Never empty.
+    destinations: Vec<ParticipantIdentity>,
 }
 
 async fn send_guaranteed(
@@ -359,15 +388,13 @@ async fn send_guaranteed(
 ) -> anyhow::Result<()> {
     while let Some(Guaranteed {
         message,
-        destination,
+        destinations,
     }) = guaranteed_rx.recv().await
     {
         let ByteStreamMessage { topic, bytes } = message;
         // Rerun already compresses chunks where that helps.
         let mut options = SendByteOptions::new_with_topic(topic).with_compress(false);
-        if let Some(destination) = destination {
-            options = options.with_destination_identity(destination);
-        }
+        options.destination_identities = destinations;
         local
             .send_bytes(&bytes, options)
             .await

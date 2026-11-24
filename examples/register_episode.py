@@ -27,7 +27,10 @@ VIDEO_COMPONENTS = ["Image:buffer", "Image:format", "EncodedImage:blob", "Encode
 LATENCY_PLOTS = "/livekit/**"
 
 # Where the MJCF importer puts the robot of `mujoco_robot.py`.
-ROBOT = "/g1\\ scene"
+ROBOT = "/go2\\ scene"
+
+# How much of the lidar's past to show at once, as `mujoco_robot.py` does.
+LIDAR_VISIBLE_SECS = 3.0
 
 
 def write_operator_layer(operator_rrd: Path, layer_rrd: Path, prefix: str, recording_id: str) -> None:
@@ -45,26 +48,34 @@ def write_operator_layer(operator_rrd: Path, layer_rrd: Path, prefix: str, recor
 
 
 def blueprint(prefix: str) -> rrb.Blueprint:
-    """The robot next to what its camera recorded, what the operator saw of it, and how late that was."""
+    """What the robot's camera recorded next to what the operator saw of it, above the robot and how late that was."""
     return rrb.Blueprint(
-        rrb.Horizontal(
-            rrb.Spatial3DView(
-                name="Robot",
-                contents=["+ /**", f"- {prefix}/**", f"- {ROBOT}/collision_geometries/**"],
-                eye_controls=rrb.EyeControls3D(
-                    position=[-2.5, -2.0, 1.6],
-                    look_target=[0.0, 0.0, 0.7],
-                    tracking_entity=f"{ROBOT}/visual_geometries/torso_link/geom_0",
-                ),
+        rrb.Vertical(
+            rrb.Horizontal(
+                rrb.Spatial2DView(name="Robot's camera", origin="/camera"),
+                rrb.Spatial2DView(name="Operator's view", origin=f"{prefix}/camera"),
             ),
-            rrb.Vertical(
-                rrb.Horizontal(
-                    rrb.Spatial2DView(name="Robot's camera", origin="/camera"),
-                    rrb.Spatial2DView(name="Operator's view", origin=f"{prefix}/camera"),
+            rrb.Horizontal(
+                rrb.Spatial3DView(
+                    name="Robot",
+                    contents=["+ /**", f"- {prefix}/**", f"- {ROBOT}/collision_geometries/**"],
+                    eye_controls=rrb.EyeControls3D(
+                        position=[-3.0, -2.4, 2.4],
+                        look_target=[0.0, 0.0, 0.3],
+                        tracking_entity=f"{ROBOT}/visual_geometries/base/geom_0",
+                    ),
+                    overrides={
+                        "lidar": rrb.VisibleTimeRanges(
+                            timeline="sim_time",
+                            start=rrb.TimeRangeBoundary.cursor_relative(seconds=-LIDAR_VISIBLE_SECS),
+                            end=rrb.TimeRangeBoundary.cursor_relative(),
+                        )
+                    },
                 ),
                 rrb.TimeSeriesView(name="Latency (ms)", origin="/livekit/latency_ms"),
                 rrb.TimeSeriesView(name="Forward velocity", origin="/velocity"),
             ),
+            row_shares=[3, 2],
         ),
         collapse_panels=True,
     )

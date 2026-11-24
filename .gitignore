@@ -26,7 +26,7 @@ __pycache__
 venv
 
 # The model that `examples/mujoco_robot.py` downloads
-examples/g1
+examples/go2
 
 # Recordings, and the blueprint that `examples/register_episode.py` writes
 *.rrd
