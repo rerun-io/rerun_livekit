@@ -84,13 +84,14 @@ class Processes:
         return process
 
     def stop(self, process: subprocess.Popen[bytes]) -> None:
-        """Interrupts `process`, and kills it if that is not enough. Does nothing if it already exited."""
-        if process.poll() is None:
+        """Interrupts `process` and its group, and kills them if that is not enough."""
+        try:
             os.killpg(process.pid, signal.SIGINT)
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                os.killpg(process.pid, signal.SIGKILL)
+            process.wait(timeout=5)
+        except ProcessLookupError:
+            pass  # The whole group already exited.
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGKILL)
         self.running.remove(process)
 
     def stop_all(self) -> None:
@@ -291,6 +292,7 @@ def check_control() -> None:
     os.waitpid(alice, 0)
 
     # Timed from the key press: the robot's 300 ms watchdog would only stop it later.
+    datagrams_since_last_read(commands)  # Older datagrams say stop too.
     quit_at = time.monotonic()
     os.write(carol_terminal, b"q")
     while b"" not in datagrams_since_last_read(commands) and time.monotonic() - quit_at < 1.0:

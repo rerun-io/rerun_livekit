@@ -87,7 +87,8 @@ struct Leases {
     current: Option<Lease>,
 
     /// Starts at the session's start time in microseconds since the Unix epoch, and grows by
-    /// one with every grant, so that ids grow across sessions and restarts too.
+    /// one with every grant. Ids grow within a session, and across sessions and restarts as
+    /// long as the clock does. A driver learns of a new session from the robot leaving anyway.
     next_id: u64,
 }
 
@@ -185,9 +186,8 @@ async fn receive_session(
                     // the lease may be its own by now.
                     let has_left = !room.remote_participants().contains_key(&identity);
                     let had_lease = has_left
-                        && lease_tx.send_if_modified(|leases| leases.drop_held_by(&identity));
+                        && lease_tx.send_if_modified(|leases| drop_lease(leases, &identity, current_tx));
                     if had_lease {
-                        current_tx.send_replace(None);
                         log::info!("{identity} left and lost the lease");
                     }
                 }
@@ -197,14 +197,14 @@ async fn receive_session(
             },
 
             Some((sender, command)) = command_rx.recv() => {
-                let mut payload = None;
+                // Followed while the lease is locked, so that a release cannot come in between
+                // accepting the command and following it.
                 lease_tx.send_if_modified(|leases| {
-                    payload = accept(&mut leases.current, &sender, &command);
+                    if let Some(payload) = accept(&mut leases.current, &sender, &command) {
+                        current_tx.send_replace(Some(payload));
+                    }
                     false
                 });
-                if let Some(payload) = payload {
-                    current_tx.send_replace(Some(payload));
-                }
             }
 
             () = async { tokio::time::sleep_until(stop_at.unwrap_or_else(Instant::now)).await }, if stop_at.is_some() => {
@@ -217,6 +217,21 @@ async fn receive_session(
     announcer.abort();
     room.close().await.ok();
     result
+}
+
+/// Drops the lease if `holder` holds it, and stops the robot. Returns whether it did.
+///
+/// Call it with the lease locked, as everything that changes the command the robot follows is.
+fn drop_lease(
+    leases: &mut Leases,
+    holder: &ParticipantIdentity,
+    current_tx: &watch::Sender<Option<Bytes>>,
+) -> bool {
+    let is_dropped = leases.drop_held_by(holder);
+    if is_dropped {
+        current_tx.send_replace(None);
+    }
+    is_dropped
 }
 
 /// Returns the payload of `command` if it comes from the lease holder and is newer than the last one.
@@ -313,9 +328,9 @@ fn register_lease_methods(
             let (lease_tx, current_tx) = (lease_tx.clone(), current_tx.clone());
             Box::pin(async move {
                 let caller = invocation.caller_identity;
-                let was_holder = lease_tx.send_if_modified(|leases| leases.drop_held_by(&caller));
+                let was_holder =
+                    lease_tx.send_if_modified(|leases| drop_lease(leases, &caller, &current_tx));
                 if was_holder {
-                    current_tx.send_replace(None);
                     log::info!("{caller} released the lease");
                 }
                 Ok(String::new())

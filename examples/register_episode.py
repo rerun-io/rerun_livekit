@@ -82,7 +82,7 @@ def main() -> None:
 
     dataset = rr.catalog.CatalogClient(args.catalog).create_dataset(args.dataset, exist_ok=True)
 
-    # Everything is written before anything is registered, so that a failure registers nothing.
+    # Everything is written before anything is registered, so that a failure to write registers nothing.
     layer_rrd = args.operator_rrd.with_suffix(".layer.rrd")
     write_operator_layer(args.operator_rrd, layer_rrd, args.operator_prefix, episode)
     blueprint_rbl = None
