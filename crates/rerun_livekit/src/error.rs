@@ -10,7 +10,6 @@ pub enum Error {
     #[error("Failed to create the LiveKit access token")]
     Token { source: AccessTokenError },
 
-    /// The URL comes last, so that the rest of the message can be shared without it.
     #[error("Failed to join room {room:?} as {identity:?} at {url}")]
     Connect {
         room: String,

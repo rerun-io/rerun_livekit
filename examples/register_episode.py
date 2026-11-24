@@ -7,6 +7,9 @@ only the operator's end knows: the camera images that reached it, and the latenc
 `rerun-livekit operator --plot-latency`. The images move below `--operator-prefix`, so that they
 sit next to the robot's instead of taking their place.
 
+It is for episodes of `mujoco_robot.py`: it reuses that script's 3D view, which reads the Go2 model
+that `mujoco_robot.py` downloads.
+
 Run it with `pixi run register-episode robot.rrd operator.rrd`, while `rerun server` is running.
 """
 
