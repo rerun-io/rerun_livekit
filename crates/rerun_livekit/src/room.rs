@@ -77,6 +77,30 @@ pub struct RoomArgs {
 }
 
 impl RoomArgs {
+    /// A room on a LiveKit server, for code that does not take these from the command line.
+    pub fn new(
+        url: impl Into<String>,
+        api_key: impl Into<String>,
+        api_secret: impl Into<String>,
+        room: impl Into<String>,
+    ) -> Self {
+        Self {
+            url: url.into(),
+            api_key: api_key.into(),
+            api_secret: api_secret.into(),
+            room: room.into(),
+            name: None,
+        }
+    }
+
+    /// Joins as `<name>-<role>` instead of `<role>`, to tell two participants with the same
+    /// role apart.
+    #[must_use]
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
+        self
+    }
+
     /// Joins the room as `role`, with a locally minted token.
     ///
     /// The identity in the room is the role, or `<name>-<role>` with `--name`. One process can
