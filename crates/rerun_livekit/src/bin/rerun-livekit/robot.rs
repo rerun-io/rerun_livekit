@@ -30,7 +30,9 @@ use crate::wire::{LATEST_TRACK, LOG_TOPIC, LatestFrame};
 /// The largest message the latest lane can carry.
 ///
 /// LiveKit's receiver gives up on a data track frame after 128 packets of at most 16 kB
-/// (the depacketizer and packetizer of `livekit-datatrack` 0.3.0).
+/// (the depacketizer and packetizer of `livekit-datatrack` 0.3.0). An operator whose link is
+/// slower than the robot's gets less: the server drops a frame that would wait more than
+/// 100 ms for it.
 const MAX_LATEST_BYTES: usize = 1_900_000;
 
 /// The most messages to route before looking at anything else, so that an app that never

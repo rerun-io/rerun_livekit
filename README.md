@@ -278,6 +278,10 @@ Two examples show it working:
   Reduce them at the source, or give them `delivery = "guaranteed"`.
 - Data on the latest lane can be lost without any network loss.
   LiveKit keeps only the newest unsent frame of a data track, so a frame that waits behind a large one can be replaced by the next.
+- What is logged together travels on the latest lane as one frame, which is lost whole.
+  For an operator whose link is slower than the robot's, LiveKit drops frames that would wait more than 100 ms for it: at worst, those over about 125 KB on a 10 Mbit/s link.
+  A large message logged often, such as a dense point cloud, then takes the small ones logged with it down.
+  Give it a `max_hz`, or reduce it at the source.
 - `VideoStream` is forwarded as data on the guaranteed lane, not over a video track.
   A video track would need LiveKit to hand over received video undecoded ([rust-sdks#1515](https://github.com/livekit/rust-sdks/pull/1515)).
 - Images arrive decoded, so the operator's Viewer holds raw frames in memory, up to its memory limit.
