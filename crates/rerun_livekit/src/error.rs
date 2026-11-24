@@ -49,6 +49,19 @@ pub enum Error {
     RobotLeft,
 }
 
+impl Error {
+    /// Whether another participant joined the room with this identity, which pushed this one
+    /// out. Rejoining would push that one out in turn, so do not retry.
+    pub fn is_replaced(&self) -> bool {
+        matches!(
+            self,
+            Self::Disconnected {
+                reason: DisconnectReason::DuplicateIdentity
+            }
+        )
+    }
+}
+
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// `err` followed by each of its causes, separated by `": "`.
@@ -68,6 +81,13 @@ pub fn with_causes(err: &dyn std::error::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_duplicate_identity_replaces() {
+        let disconnected = |reason| Error::Disconnected { reason };
+        assert!(disconnected(DisconnectReason::DuplicateIdentity).is_replaced());
+        assert!(!disconnected(DisconnectReason::ServerShutdown).is_replaced());
+    }
 
     #[test]
     fn causes_follow_the_top_line() {

@@ -140,7 +140,7 @@ async fn handle_room_events(
                 tokio::spawn(receive_latest(frames, viewer_tx.clone(), latency));
             }
             RoomEvent::Disconnected { reason } => {
-                anyhow::bail!("Disconnected from the room: {reason:?}");
+                return Err(rerun_livekit::Error::Disconnected { reason }.into());
             }
             _ => {}
         }

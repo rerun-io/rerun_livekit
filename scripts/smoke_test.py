@@ -84,12 +84,13 @@ class Processes:
         return process
 
     def stop(self, process: subprocess.Popen[bytes]) -> None:
-        """Interrupts `process`, and kills it if that is not enough."""
-        os.killpg(process.pid, signal.SIGINT)
-        try:
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            os.killpg(process.pid, signal.SIGKILL)
+        """Interrupts `process`, and kills it if that is not enough. Does nothing if it already exited."""
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGINT)
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                os.killpg(process.pid, signal.SIGKILL)
         self.running.remove(process)
 
     def stop_all(self) -> None:
@@ -318,7 +319,7 @@ def run(processes: Processes, temp: Path) -> None:
     rules = temp / "rules.toml"
     rules.write_text(RULES)
     # Above the app's 20 Hz: LiveKit's default for images this small is 15 frames per second.
-    processes.start(
+    robot = processes.start(
         "robot",
         BRIDGE,
         "robot",
@@ -356,6 +357,16 @@ def run(processes: Processes, temp: Path) -> None:
 
     print("Control")
     check_control()
+
+    print("One robot per room")
+    processes.start("second_robot", BRIDGE, "robot", "--proxy", proxy_url(ROBOT_PROXY_PORT))
+    try:
+        exit_code = robot.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        exit_code = None
+    check(exit_code not in (None, 0), "a second robot in the room makes the first one stop")
+    log = (temp / "robot.log").read_text(errors="replace")
+    check("Another participant joined the room" in log, "the first robot says why it stopped")
 
 
 if __name__ == "__main__":

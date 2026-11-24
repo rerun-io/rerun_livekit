@@ -62,16 +62,22 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
-/// Runs sessions back to back, forever.
+/// Runs sessions back to back, until another participant takes this one's place in the room.
 ///
 /// Starting over is the only recovery mechanism: a new session reconnects both ends, and
 /// joining the room again makes the robot replay what a newcomer needs.
-async fn retry<F>(mut run_session: impl FnMut() -> F) -> !
+async fn retry<F>(mut run_session: impl FnMut() -> F) -> anyhow::Result<()>
 where
     F: Future<Output = anyhow::Result<Infallible>>,
 {
     loop {
         let Err(err) = run_session().await;
+        if err
+            .downcast_ref::<rerun_livekit::Error>()
+            .is_some_and(rerun_livekit::Error::is_replaced)
+        {
+            return Err(err.context("Another participant joined the room with this identity"));
+        }
         log::warn!("Session ended, starting a new one in {SESSION_RETRY_DELAY:?}: {err:#}");
         tokio::time::sleep(SESSION_RETRY_DELAY).await;
     }

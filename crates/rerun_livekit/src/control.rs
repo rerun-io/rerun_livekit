@@ -86,6 +86,7 @@ struct Lease {
 ///
 /// The value is `None`, and the robot must stop, whenever no driver holds the lease, or the
 /// holder's commands stopped arriving for `watchdog_timeout`, or the room is unreachable.
+/// It stays `None` for good once another robot joins the room, which has room for one.
 pub fn receive_commands(
     room: RoomArgs,
     watchdog_timeout: Duration,
@@ -95,6 +96,10 @@ pub fn receive_commands(
         loop {
             let Err(err) = receive_session(&room, watchdog_timeout, &current_tx).await;
             current_tx.send_replace(None);
+            if err.is_replaced() {
+                log::error!("Another robot joined the room, so this one no longer takes commands");
+                return;
+            }
             log::warn!(
                 "Command session ended, starting a new one in {RETRY_DELAY:?}: {}",
                 with_causes(&err)

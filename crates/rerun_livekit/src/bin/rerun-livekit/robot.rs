@@ -183,7 +183,7 @@ async fn forward(
                     router.remove_operator(&participant.identity());
                 }
                 RoomEvent::Disconnected { reason } => {
-                    anyhow::bail!("Disconnected from the room: {reason:?}");
+                    return Err(rerun_livekit::Error::Disconnected { reason }.into());
                 }
                 _ => {}
             },
