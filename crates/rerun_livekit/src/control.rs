@@ -11,7 +11,7 @@
 //!   the lease, so a driver that crashed does not lock everyone else out.
 
 use std::collections::HashMap;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
 use futures_util::StreamExt as _;
@@ -36,8 +36,8 @@ const RELEASE_METHOD: &str = "teleop.release";
 /// Attribute of the robot's participant that holds the id of the current lease, in decimal.
 /// Absent while no driver holds the lease.
 ///
-/// Every grant has a new id, so a driver always sees its own grant announced, even when it
-/// re-acquires under the same identity.
+/// Lease ids only grow, so a driver that sees a larger id than its own knows that another
+/// driver took over.
 const LEASE_ATTRIBUTE: &str = "teleop.lease";
 
 /// RPC error code for "another driver holds the lease", with the holder as its data.
@@ -82,6 +82,27 @@ struct Lease {
     last_heard: Instant,
 }
 
+/// The robot's lease, and the id of the next one it grants.
+struct Leases {
+    current: Option<Lease>,
+
+    /// Starts at the session's start time in microseconds since the Unix epoch, and grows by
+    /// one with every grant, so that ids grow across sessions and restarts too.
+    next_id: u64,
+}
+
+impl Leases {
+    fn new() -> Self {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default();
+        Self {
+            current: None,
+            next_id: u64::try_from(now.as_micros()).unwrap_or(u64::MAX),
+        }
+    }
+}
+
 /// Joins the room and returns the command the robot should follow right now.
 ///
 /// The value is `None`, and the robot must stop, whenever no driver holds the lease, or the
@@ -119,7 +140,7 @@ async fn receive_session(
     let local = room.local_participant();
     // The only copy of the lease. Granting or dropping it notifies `lease_rx`, so that the
     // room hears of it. Accepting a command does not.
-    let lease_tx = watch::Sender::new(None::<Lease>);
+    let lease_tx = watch::Sender::new(Leases::new());
     let mut lease_rx = lease_tx.subscribe();
     register_lease_methods(&local, &lease_tx, watchdog_timeout, current_tx);
     log::info!("Waiting for a driver");
@@ -129,6 +150,7 @@ async fn receive_session(
         // When to stop unless another command arrives. `None` while already stopped.
         let stop_at = lease_tx
             .borrow()
+            .current
             .as_ref()
             .filter(|_| current_tx.borrow().is_some())
             .map(|lease| lease.last_heard + watchdog_timeout);
@@ -145,8 +167,8 @@ async fn receive_session(
 
             Some((sender, command)) = command_rx.recv() => {
                 let mut payload = None;
-                lease_tx.send_if_modified(|lease| {
-                    payload = accept(lease, &sender, &command);
+                lease_tx.send_if_modified(|leases| {
+                    payload = accept(&mut leases.current, &sender, &command);
                     false
                 });
                 if let Some(payload) = payload {
@@ -157,7 +179,7 @@ async fn receive_session(
             // The only place that announces the lease, always as it is now, so that the last
             // announcement is the truth.
             Ok(()) = lease_rx.changed() => {
-                let lease_id = lease_rx.borrow_and_update().as_ref().map(|lease| lease.id);
+                let lease_id = lease_rx.borrow_and_update().current.as_ref().map(|lease| lease.id);
                 announce_lease(&local, lease_id).await;
             }
 
@@ -202,7 +224,7 @@ async fn announce_lease(local: &LocalParticipant, lease_id: Option<u64>) {
 
 fn register_lease_methods(
     local: &LocalParticipant,
-    lease_tx: &watch::Sender<Option<Lease>>,
+    lease_tx: &watch::Sender<Leases>,
     watchdog_timeout: Duration,
     current_tx: &watch::Sender<Option<Bytes>>,
 ) {
@@ -214,16 +236,17 @@ fn register_lease_methods(
                 let caller = invocation.caller_identity;
                 // Decided and granted in one step, so that two drivers cannot both get it.
                 let mut granted = Err(String::new());
-                lease_tx.send_if_modified(|lease| {
-                    let driving = lease.as_ref().filter(|held| {
+                lease_tx.send_if_modified(|leases| {
+                    let driving = leases.current.as_ref().filter(|held| {
                         held.holder != caller && held.last_heard.elapsed() < watchdog_timeout
                     });
                     if let Some(held) = driving {
                         granted = Err(held.holder.to_string());
                         return false;
                     }
-                    let id = rand::random();
-                    *lease = Some(Lease {
+                    let id = leases.next_id;
+                    leases.next_id += 1;
+                    leases.current = Some(Lease {
                         id,
                         holder: caller.clone(),
                         last_seq: None,
@@ -252,10 +275,13 @@ fn register_lease_methods(
             let (lease_tx, current_tx) = (lease_tx.clone(), current_tx.clone());
             Box::pin(async move {
                 let caller = invocation.caller_identity;
-                let was_holder = lease_tx.send_if_modified(|lease| {
-                    let was_holder = lease.as_ref().is_some_and(|held| held.holder == caller);
+                let was_holder = lease_tx.send_if_modified(|leases| {
+                    let was_holder = leases
+                        .current
+                        .as_ref()
+                        .is_some_and(|held| held.holder == caller);
                     if was_holder {
-                        *lease = None;
+                        leases.current = None;
                     }
                     was_holder
                 });
@@ -305,7 +331,6 @@ pub struct Driver {
     track: LocalDataTrack,
     lease: u64,
     seq: u64,
-    lease_watch: LeaseWatch,
 }
 
 impl Driver {
@@ -354,7 +379,6 @@ impl Driver {
             .await
             .map_err(|source| Error::PublishCommandTrack { source })?;
 
-        let lease_watch = LeaseWatch::new(lease);
         Ok(Self {
             room,
             events,
@@ -362,7 +386,6 @@ impl Driver {
             track,
             lease,
             seq: 0,
-            lease_watch,
         })
     }
 
@@ -382,8 +405,11 @@ impl Driver {
                     participant,
                     changed_attributes,
                 } if participant.identity() == self.robot => {
-                    if let Some(lease) = changed_attributes.get(LEASE_ATTRIBUTE) {
-                        self.lease_watch.on_announced(lease)?;
+                    if changed_attributes
+                        .get(LEASE_ATTRIBUTE)
+                        .is_some_and(|announced| is_lease_lost(announced, self.lease))
+                    {
+                        return Err(Error::LeaseLost);
                     }
                 }
                 RoomEvent::ParticipantDisconnected(participant)
@@ -419,35 +445,12 @@ impl Driver {
     }
 }
 
-/// Whether a driver still holds its lease, going by the lease the robot announces.
-///
-/// Announcements made before the robot announced this driver's lease are stale: they come from
-/// before the acquire, such as the previous driver's release. Only a later announcement of
-/// another lease, or of none, means that this one is gone.
-struct LeaseWatch {
-    lease: String,
-    has_been_announced: bool,
-}
-
-impl LeaseWatch {
-    fn new(lease: u64) -> Self {
-        Self {
-            lease: lease.to_string(),
-            has_been_announced: false,
-        }
-    }
-
-    /// Takes in a lease the robot announced, as the value of [`LEASE_ATTRIBUTE`]. Empty means none.
-    fn on_announced(&mut self, lease: &str) -> Result<()> {
-        if lease == self.lease {
-            self.has_been_announced = true;
-            Ok(())
-        } else if self.has_been_announced {
-            Err(Error::LeaseLost)
-        } else {
-            Ok(())
-        }
-    }
+/// Whether the robot announcing `announced` means that `lease` is gone: another driver got a
+/// later one. An empty value, a release or a holder that left, says nothing about `lease`.
+fn is_lease_lost(announced: &str, lease: u64) -> bool {
+    announced
+        .parse::<u64>()
+        .is_ok_and(|announced| lease < announced)
 }
 
 #[cfg(test)]
@@ -505,19 +508,11 @@ mod tests {
     }
 
     #[test]
-    fn only_a_later_announcement_takes_the_lease() {
-        let holds_after = |announcements: &[&str]| {
-            let mut watch = LeaseWatch::new(7);
-            announcements
-                .iter()
-                .try_for_each(|lease| watch.on_announced(lease))
-                .is_ok()
-        };
-
-        assert!(holds_after(&["", "7"]), "the previous driver's release");
-        assert!(holds_after(&["3", "7"]), "the previous lease");
-        assert!(holds_after(&["7", "7"]), "announced again");
-        assert!(!holds_after(&["7", "9"]), "another driver took over");
-        assert!(!holds_after(&["7", ""]), "the robot dropped the lease");
+    fn only_a_later_lease_takes_this_one() {
+        assert!(!is_lease_lost("", 7), "nobody holds a lease");
+        assert!(!is_lease_lost("7", 7), "this lease");
+        assert!(!is_lease_lost("3", 7), "an earlier lease");
+        assert!(is_lease_lost("9", 7), "another driver took over");
+        assert!(!is_lease_lost("not a lease", 7), "not a lease id");
     }
 }
