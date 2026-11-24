@@ -41,7 +41,7 @@ pub enum Error {
         source: std::num::ParseIntError,
     },
 
-    /// The robot gave the lease to another driver, for example after it restarted.
+    /// Another driver took over after this one went quiet, or the robot dropped the lease.
     #[error("Lost the lease")]
     LeaseLost,
 

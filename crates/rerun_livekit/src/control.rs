@@ -33,11 +33,11 @@ const ACQUIRE_METHOD: &str = "teleop.acquire";
 /// RPC on the robot that gives the lease back.
 const RELEASE_METHOD: &str = "teleop.release";
 
-/// Attribute of the robot's participant that holds the id of the current lease, in decimal.
-/// Absent while no driver holds the lease.
+/// Attribute of the robot's participant that holds, in decimal, the id of the current lease,
+/// or while no driver holds one, the id the next lease will get.
 ///
-/// Lease ids only grow, so a driver that sees a larger id than its own knows that another
-/// driver took over.
+/// Lease ids only grow, so a larger value than a driver's own lease means that its lease is
+/// gone: another driver took over, or the robot dropped it.
 const LEASE_ATTRIBUTE: &str = "teleop.lease";
 
 /// RPC error code for "another driver holds the lease", with the holder as its data.
@@ -100,6 +100,11 @@ impl Leases {
             current: None,
             next_id: u64::try_from(now.as_micros()).unwrap_or(u64::MAX),
         }
+    }
+
+    /// The value of [`LEASE_ATTRIBUTE`].
+    fn announced_id(&self) -> u64 {
+        self.current.as_ref().map_or(self.next_id, |lease| lease.id)
     }
 
     /// Drops the lease if `holder` holds it. Returns whether it did.
@@ -232,23 +237,25 @@ fn accept(
     Some(command.payload.clone())
 }
 
-/// Tells everyone in the room which lease is current, every time it changes.
+/// Keeps [`LEASE_ATTRIBUTE`] up to date, from the start of the session on.
 ///
-/// It is the only writer of [`LEASE_ATTRIBUTE`], and it always writes the lease as it is now,
-/// so the last announcement is the truth. It runs apart from the session loop, because an
-/// announcement can take seconds and the watchdog must not wait for it.
+/// It is the only writer of the attribute, it always writes the lease as it is now, and it
+/// retries until a write succeeds, so the attribute ends up true. It runs apart from the
+/// session loop, because an announcement can take seconds and the watchdog must not wait for it.
 async fn announce_leases(local: LocalParticipant, mut lease_rx: watch::Receiver<Leases>) {
-    while lease_rx.changed().await.is_ok() {
-        let lease_id = lease_rx
-            .borrow_and_update()
-            .current
-            .as_ref()
-            .map(|lease| lease.id);
-        // An empty value removes the attribute.
-        let value = lease_id.map(|id| id.to_string()).unwrap_or_default();
+    loop {
+        let value = lease_rx.borrow_and_update().announced_id().to_string();
         let attributes = HashMap::from([(LEASE_ATTRIBUTE.to_owned(), value)]);
-        if let Err(err) = local.set_attributes(attributes).await {
-            log::warn!("Failed to announce the lease: {err}");
+        match local.set_attributes(attributes).await {
+            Ok(()) => {
+                if lease_rx.changed().await.is_err() {
+                    return;
+                }
+            }
+            Err(err) => {
+                log::warn!("Failed to announce the lease, trying again in {RETRY_DELAY:?}: {err}");
+                tokio::time::sleep(RETRY_DELAY).await;
+            }
         }
     }
 }
@@ -467,8 +474,8 @@ impl Driver {
     }
 }
 
-/// Whether the robot announcing `announced` means that `lease` is gone: another driver got a
-/// later one. An empty value, a release or a holder that left, says nothing about `lease`.
+/// Whether the robot announcing `announced` as its [`LEASE_ATTRIBUTE`] means that `lease` is
+/// gone. Earlier values, from before this lease was granted, are smaller or equal.
 fn is_lease_lost(announced: &str, lease: u64) -> bool {
     announced
         .parse::<u64>()
@@ -530,11 +537,40 @@ mod tests {
     }
 
     #[test]
-    fn only_a_later_lease_takes_this_one() {
-        assert!(!is_lease_lost("", 7), "nobody holds a lease");
-        assert!(!is_lease_lost("7", 7), "this lease");
+    fn only_a_larger_announcement_takes_this_lease() {
+        assert!(
+            !is_lease_lost("7", 7),
+            "this lease, or no lease before it was granted"
+        );
         assert!(!is_lease_lost("3", 7), "an earlier lease");
+        assert!(is_lease_lost("8", 7), "the robot dropped this lease");
         assert!(is_lease_lost("9", 7), "another driver took over");
-        assert!(!is_lease_lost("not a lease", 7), "not a lease id");
+        assert!(
+            !is_lease_lost("", 7),
+            "a robot that has announced nothing yet"
+        );
+    }
+
+    #[test]
+    fn without_a_lease_the_next_id_is_announced() {
+        let mut leases = Leases::new();
+        let next_id = leases.next_id;
+        assert_eq!(leases.announced_id(), next_id);
+
+        let alice = ParticipantIdentity("alice".to_owned());
+        leases.current = Some(Lease {
+            id: next_id,
+            holder: alice.clone(),
+            last_seq: None,
+            last_heard: Instant::now(),
+        });
+        leases.next_id += 1;
+        assert_eq!(leases.announced_id(), next_id, "the current lease");
+
+        assert!(leases.drop_held_by(&alice));
+        assert!(
+            is_lease_lost(&leases.announced_id().to_string(), next_id),
+            "dropping the lease tells its driver"
+        );
     }
 }
