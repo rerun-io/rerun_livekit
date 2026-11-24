@@ -1,10 +1,21 @@
-//! Command line for the Rerun and LiveKit bridge. See the crate docs of `rerun_livekit`.
+//! The bridge: carries a Rerun stream from a robot through a LiveKit room to operators.
+//!
+//! [`robot`] reads the stream from a Rerun proxy next to the robot and publishes it to a room.
+//! [`operator`] receives it from the room and writes it to a Viewer next to the operator.
+
+mod classify;
+mod latency;
+mod operator;
+mod proxy;
+mod robot;
+mod rules;
+mod video;
+mod wire;
 
 use std::convert::Infallible;
 use std::time::Duration;
 
 use clap::Parser as _;
-use rerun_livekit::{operator, robot};
 
 /// How long to wait before starting a new session after one ended.
 const SESSION_RETRY_DELAY: Duration = Duration::from_secs(2);

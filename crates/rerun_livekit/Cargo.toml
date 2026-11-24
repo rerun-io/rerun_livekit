@@ -24,7 +24,7 @@ targets = ["x86_64-unknown-linux-gnu"]
 
 [[bin]]
 name = "rerun-livekit"
-path = "src/main.rs"
+path = "src/bin/rerun-livekit/main.rs"
 
 
 [dependencies]

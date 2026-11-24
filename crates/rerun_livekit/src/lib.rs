@@ -1,20 +1,13 @@
-//! Carries any Rerun stream over a LiveKit room, for teleoperation.
+//! Joins the LiveKit room of a `rerun-livekit` bridge, and sends commands to the robot
+//! through it.
 //!
-//! [`robot`] reads the stream from a Rerun proxy next to the robot and publishes it to a room.
-//! [`operator`] receives it from the room and writes it to a viewer next to the operator.
-//! [`control`] sends commands the other way, and does not depend on the other two.
+//! The bridge itself, which carries a Rerun stream from a robot to operators, is the
+//! `rerun-livekit` binary of this crate. This library is for the code at either end of
+//! [`control`]: an input device that drives the robot, and the robot that follows it.
 
-mod classify;
 pub mod control;
-mod latency;
 mod logging;
-pub mod operator;
-mod proxy;
-pub mod robot;
 mod room;
-mod rules;
-mod video;
 
 pub use self::logging::init_logging;
 pub use self::room::{Role, RoomArgs};
-pub use self::video::VideoCodecArg;

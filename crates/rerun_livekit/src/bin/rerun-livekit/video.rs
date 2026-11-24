@@ -65,7 +65,7 @@ const JPEG_QUALITY: u8 = 90;
 
 /// The codecs LiveKit can encode images with.
 #[derive(Clone, Copy, Debug, clap::ValueEnum)]
-pub enum VideoCodecArg {
+pub(crate) enum VideoCodecArg {
     Av1,
     H264,
     H265,

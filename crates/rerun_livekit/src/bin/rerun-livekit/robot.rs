@@ -22,10 +22,11 @@ use rerun::log::Chunk;
 use tokio::sync::mpsc;
 
 use crate::classify::{Retention, Route, StreamKey, Temporal, classify};
-use crate::control::send_commands_to_udp;
-use crate::room::{LATEST_TRACK, LOG_TOPIC, LatestFrame, Role, RoomArgs};
+use rerun_livekit::{Role, RoomArgs};
+
 use crate::rules::{Delivery, Rules, Video};
 use crate::video::{EncoderLimits, Sent, TRACK_INFO_TOPIC, VideoCodecArg, VideoPublisher};
+use crate::wire::{LATEST_TRACK, LOG_TOPIC, LatestFrame};
 
 /// The largest message the latest lane can carry.
 ///
@@ -96,7 +97,10 @@ pub fn start_command_forwarding(args: &RobotArgs) -> anyhow::Result<()> {
     let Some(to) = args.commands_to_udp else {
         return Ok(());
     };
-    send_commands_to_udp(args.room.clone().with_identity_suffix("-control"), to)
+    rerun_livekit::control::send_commands_to_udp(
+        args.room.clone().with_identity_suffix("-control"),
+        to,
+    )
 }
 
 /// Runs one session, which lasts until the proxy or the room goes away.

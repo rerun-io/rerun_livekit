@@ -1,23 +1,9 @@
-//! Joining the LiveKit room, and the names the two sides of the bridge share in it.
+//! Joining the LiveKit room.
 
 use anyhow::Context as _;
 use livekit::prelude::*;
 use livekit_api::access_token::{AccessToken, VideoGrants};
 use tokio::sync::mpsc::UnboundedReceiver;
-
-/// Topic of the byte streams that carry guaranteed Rerun log messages.
-pub const LOG_TOPIC: &str = "rerun.log";
-
-/// Name of the data track that carries latest-wins Rerun log messages, as [`LatestFrame`]s.
-pub const LATEST_TRACK: &str = "rerun.latest";
-
-/// One frame of [`LATEST_TRACK`]: the latest-wins messages that were logged together.
-#[derive(Clone, PartialEq, Eq, prost::Message)]
-pub struct LatestFrame {
-    /// Encoded log messages.
-    #[prost(bytes = "bytes", repeated, tag = "1")]
-    pub log_msgs: Vec<bytes::Bytes>,
-}
 
 /// Participant attribute holding a [`Role`].
 const ROLE_ATTRIBUTE: &str = "rerun.role";
