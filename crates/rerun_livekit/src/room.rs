@@ -39,9 +39,9 @@ impl Role {
 
     /// Whether a room has at most one participant with this role: the robot's roles.
     ///
-    /// Their identity is the bare role, so that a robot that restarts replaces the participant
-    /// it left behind, and a second robot in the room pushes the first one out instead of
-    /// mixing in.
+    /// Without `--name`, their identity is the bare role, so that a robot that restarts replaces
+    /// the participant it left behind, and a second robot in the room pushes the first one out
+    /// instead of mixing in. That is why a robot should not be given a name.
     fn is_one_per_room(self) -> bool {
         match self {
             Self::Robot | Self::RobotControl => true,
@@ -64,6 +64,8 @@ impl Role {
 }
 
 /// Where the room is and how to get into it.
+///
+/// Clones join with the same identity, so use one per participant.
 #[derive(Clone, Debug, clap::Args)]
 pub struct RoomArgs {
     /// LiveKit server URL.
@@ -79,7 +81,7 @@ pub struct RoomArgs {
     api_secret: String,
 
     /// Room to join. One robot per room: the robot, its operators and its driver must use
-    /// the same one.
+    /// the same one. A second robot without `--name` pushes the first one out.
     #[arg(long, default_value = "rerun")]
     room: String,
 

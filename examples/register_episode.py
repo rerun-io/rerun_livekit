@@ -82,7 +82,7 @@ def main() -> None:
 
     dataset = rr.catalog.CatalogClient(args.catalog).create_dataset(args.dataset, exist_ok=True)
 
-    # Built before anything is registered, so that a failure leaves the dataset as it was.
+    # Built before any segment is registered, so that a failure registers nothing.
     blueprint_rbl = None
     if dataset.default_blueprint() is None:
         download_model()

@@ -94,7 +94,7 @@ export LIVEKIT_URL=ws://<robot>:7880                               # on the oper
 
 Every command also takes `--url`, `--api-key`, `--api-secret` and `--room`.
 A room holds one robot, and any number of operators.
-Give each robot its own room.
+Give each robot its own room, and no `--name`: then a second robot in the same room pushes the first one out instead of mixing in.
 For a web Viewer on the operator side, run `rerun --serve-web` there and pass its proxy address as `--viewer`.
 
 ## How data travels
