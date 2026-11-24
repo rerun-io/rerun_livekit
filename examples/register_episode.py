@@ -18,19 +18,16 @@ from pathlib import Path
 
 import rerun as rr
 import rerun.blueprint as rrb
+from mujoco_robot import SCENE_XML, robot_view
 from rerun.chunk import LazyChunkStream, RrdReader
+from rerun.mjcf import MjcfTree
 
 # What the bridge sends as video, which is where the operator's copy differs from the robot's.
+# See "How data travels" in the README.
 VIDEO_COMPONENTS = ["Image:buffer", "Image:format", "EncodedImage:blob", "EncodedImage:media_type"]
 
 # Where `rerun-livekit operator --plot-latency` plots.
 LATENCY_PLOTS = "/livekit/**"
-
-# Where the MJCF importer puts the robot of `mujoco_robot.py`.
-ROBOT = "/go2\\ scene"
-
-# How much of the lidar's past to show at once, as `mujoco_robot.py` does.
-LIDAR_VISIBLE_SECS = 3.0
 
 
 def write_operator_layer(operator_rrd: Path, layer_rrd: Path, prefix: str, recording_id: str) -> None:
@@ -56,22 +53,7 @@ def blueprint(prefix: str) -> rrb.Blueprint:
                 rrb.Spatial2DView(name="Operator's view", origin=f"{prefix}/camera"),
             ),
             rrb.Horizontal(
-                rrb.Spatial3DView(
-                    name="Robot",
-                    contents=["+ /**", f"- {prefix}/**", f"- {ROBOT}/collision_geometries/**"],
-                    eye_controls=rrb.EyeControls3D(
-                        position=[-3.0, -2.4, 2.4],
-                        look_target=[0.0, 0.0, 0.3],
-                        tracking_entity=f"{ROBOT}/visual_geometries/base/geom_0",
-                    ),
-                    overrides={
-                        "lidar": rrb.VisibleTimeRanges(
-                            timeline="sim_time",
-                            start=rrb.TimeRangeBoundary.cursor_relative(seconds=-LIDAR_VISIBLE_SECS),
-                            end=rrb.TimeRangeBoundary.cursor_relative(),
-                        )
-                    },
-                ),
+                robot_view(MjcfTree.from_file_path(SCENE_XML), exclude=(f"{prefix}/**",)),
                 rrb.TimeSeriesView(name="Latency (ms)", origin="/livekit/latency_ms"),
                 rrb.TimeSeriesView(name="Forward velocity", origin="/velocity"),
             ),

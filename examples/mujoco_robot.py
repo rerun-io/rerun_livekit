@@ -213,29 +213,38 @@ def load_model() -> mujoco.MjModel:
     return spec.compile()
 
 
+def robot_view(mjcf: MjcfTree, exclude: tuple[str, ...] = ()) -> rrb.Spatial3DView:
+    """A 3D view that follows the robot, with the lidar's recent points, without the entities in `exclude`."""
+    return rrb.Spatial3DView(
+        name="Go2",
+        # MJCF does not mark geoms as collision geometry, so the importer goes by their group.
+        contents=[
+            "+ /**",
+            f"- /{rr.escape_entity_path_part(mjcf.name)}/collision_geometries/**",
+            *(f"- {path}" for path in exclude),
+        ],
+        eye_controls=rrb.EyeControls3D(
+            position=[-3.0, -2.4, 2.4],
+            look_target=[0.0, 0.0, 0.3],
+            tracking_entity=mjcf.get_visual_geometry_paths(BASE_BODY)[0],
+        ),
+        overrides={
+            "lidar": rrb.VisibleTimeRanges(
+                timeline="sim_time",
+                start=rrb.TimeRangeBoundary.cursor_relative(seconds=-LIDAR_VISIBLE_SECS),
+                end=rrb.TimeRangeBoundary.cursor_relative(),
+            )
+        },
+    )
+
+
 def blueprint(mjcf: MjcfTree) -> rrb.Blueprint:
     """What the robot sees, next to a 3D view that follows it and how well it follows the commands."""
     return rrb.Blueprint(
         rrb.Horizontal(
             rrb.Spatial2DView(name="Front camera", origin="/camera"),
             rrb.Vertical(
-                rrb.Spatial3DView(
-                    name="Go2",
-                    # MJCF does not mark geoms as collision geometry, so the importer goes by their group.
-                    contents=["+ /**", f"- /{rr.escape_entity_path_part(mjcf.name)}/collision_geometries/**"],
-                    eye_controls=rrb.EyeControls3D(
-                        position=[-3.0, -2.4, 2.4],
-                        look_target=[0.0, 0.0, 0.3],
-                        tracking_entity=mjcf.get_visual_geometry_paths(BASE_BODY)[0],
-                    ),
-                    overrides={
-                        "lidar": rrb.VisibleTimeRanges(
-                            timeline="sim_time",
-                            start=rrb.TimeRangeBoundary.cursor_relative(seconds=-LIDAR_VISIBLE_SECS),
-                            end=rrb.TimeRangeBoundary.cursor_relative(),
-                        )
-                    },
-                ),
+                robot_view(mjcf),
                 rrb.TimeSeriesView(name="Forward velocity", origin="/velocity"),
                 rrb.TimeSeriesView(name="Turn rate", origin="/turn_rate"),
                 row_shares=[3, 1, 1],
