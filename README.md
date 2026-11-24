@@ -214,7 +214,7 @@ It follows LiveKit's [teleoperation pattern](https://docs.livekit.io/robotics/te
   A lost command is replaced by the next one and never retried late.
 - The robot hands out a lease.
   Only the lease holder's commands count, and a second driver is refused.
-- The robot stops when commands stop arriving.
+- The robot stops when commands stop arriving, or arrive late.
   From then on another driver may take the lease.
 
 Both ends join the room with a `RoomArgs`.
@@ -285,8 +285,8 @@ Two examples show it working:
 - `VideoStream` is forwarded as data on the guaranteed lane, not over a video track.
   A video track would need LiveKit to hand over received video undecoded ([rust-sdks#1515](https://github.com/livekit/rust-sdks/pull/1515)).
 - Images arrive decoded, so the operator's Viewer holds raw frames in memory, up to its memory limit.
-- Commands carry no timestamp.
-  A command that the network delays is followed when it arrives.
+- A command counts as lost when it arrives more than the watchdog timeout later than the fastest one of its lease.
+  This needs no synchronized clocks, but if the driver's or the robot's clock jumps by more than that during a lease, the robot stops until the driver takes the lease again.
 
 ## Latency
 

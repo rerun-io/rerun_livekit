@@ -9,6 +9,9 @@
 //! - One driver at a time holds a lease, which it gets from the robot with an RPC.
 //! - The robot stops when valid commands stop arriving. From then on another driver may take
 //!   the lease, so a driver that crashed does not lock everyone else out.
+//! - A command that arrives more than the watchdog timeout later than the fastest one of its
+//!   lease counts as lost, so a link that starts holding commands back stops the robot
+//!   instead of steering it late.
 
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -78,8 +81,22 @@ struct Lease {
     /// Sequence number of the last command that was accepted.
     last_seq: Option<u64>,
 
+    /// The smallest [`Received::delay_ms`] of the accepted commands. Comparing a delay with it
+    /// cancels out the offset between the two clocks.
+    min_delay_ms: Option<i64>,
+
     /// When the holder last proved it is there: by taking the lease or by a valid command.
     last_heard: Instant,
+}
+
+/// A command as it reached the robot.
+struct Received {
+    sender: ParticipantIdentity,
+    command: CommandMsg,
+
+    /// When the command reached the robot, minus when the driver sent it, in milliseconds by
+    /// each one's clock: the network delay plus the offset between the clocks.
+    delay_ms: i64,
 }
 
 /// The robot's lease, and the id of the next one it grants.
@@ -125,6 +142,9 @@ impl Leases {
 ///
 /// The value is `None`, and the robot must stop, whenever no driver holds the lease, or the
 /// holder's commands stopped arriving for `watchdog_timeout`, or the room is unreachable.
+/// A command that arrives more than `watchdog_timeout` later than the fastest one of its lease
+/// counts as lost. This needs no synchronized clocks, but if either clock jumps by more than
+/// that during a lease, the robot stops until the driver takes the lease again.
 /// It stays `None` for good once another robot joins the room as this one, which has room for
 /// one: the receiver then sees no more changes.
 pub fn receive_commands(
@@ -165,7 +185,7 @@ async fn receive_session(
     register_lease_methods(&local, &lease_tx, watchdog_timeout, current_tx);
     log::info!("Waiting for a driver");
 
-    let (command_tx, mut command_rx) = mpsc::channel::<(ParticipantIdentity, CommandMsg)>(4);
+    let (command_tx, mut command_rx) = mpsc::channel::<Received>(4);
     let result = loop {
         // When to stop unless another command arrives. `None` while already stopped.
         let stop_at = lease_tx
@@ -196,11 +216,11 @@ async fn receive_session(
                 None => break Err(Error::RoomClosed),
             },
 
-            Some((sender, command)) = command_rx.recv() => {
+            Some(received) = command_rx.recv() => {
                 // Followed while the lease is locked, so that a release cannot come in between
                 // accepting the command and following it.
                 lease_tx.send_if_modified(|leases| {
-                    if let Some(payload) = accept(&mut leases.current, &sender, &command) {
+                    if let Some(payload) = accept(&mut leases.current, &received, watchdog_timeout) {
                         current_tx.send_replace(Some(payload));
                     }
                     false
@@ -209,7 +229,7 @@ async fn receive_session(
 
             () = async { tokio::time::sleep_until(stop_at.unwrap_or_else(Instant::now)).await }, if stop_at.is_some() => {
                 if current_tx.send_replace(None).is_some() {
-                    log::warn!("No command for {watchdog_timeout:?}, stopping");
+                    log::warn!("No command, or only late ones, for {watchdog_timeout:?}: stopping");
                 }
             }
         }
@@ -234,20 +254,31 @@ fn drop_lease(
     is_dropped
 }
 
-/// Returns the payload of `command` if it comes from the lease holder and is newer than the last one.
-fn accept(
-    lease: &mut Option<Lease>,
-    sender: &ParticipantIdentity,
-    command: &CommandMsg,
-) -> Option<Bytes> {
+/// Returns the payload of a command if it comes from the lease holder, is newer than the last
+/// one, and arrived no more than `max_lateness` later than the fastest one of the lease.
+fn accept(lease: &mut Option<Lease>, received: &Received, max_lateness: Duration) -> Option<Bytes> {
     let lease = lease.as_mut()?;
+    let Received {
+        sender,
+        command,
+        delay_ms,
+    } = received;
+    let max_lateness_ms = i64::try_from(max_lateness.as_millis()).unwrap_or(i64::MAX);
     let is_valid = lease.holder == *sender
         && lease.id == command.lease
-        && lease.last_seq.is_none_or(|last_seq| last_seq < command.seq);
+        && lease.last_seq.is_none_or(|last_seq| last_seq < command.seq)
+        && lease
+            .min_delay_ms
+            .is_none_or(|min_delay_ms| delay_ms.saturating_sub(min_delay_ms) <= max_lateness_ms);
     if !is_valid {
         return None;
     }
     lease.last_seq = Some(command.seq);
+    lease.min_delay_ms = Some(
+        lease
+            .min_delay_ms
+            .map_or(*delay_ms, |min| min.min(*delay_ms)),
+    );
     lease.last_heard = Instant::now();
     Some(command.payload.clone())
 }
@@ -303,6 +334,7 @@ fn register_lease_methods(
                         id,
                         holder: caller.clone(),
                         last_seq: None,
+                        min_delay_ms: None,
                         last_heard: Instant::now(),
                     });
                     granted = Ok(id);
@@ -340,10 +372,7 @@ fn register_lease_methods(
 }
 
 /// Forwards the commands on `track` until the track or the receiver goes away.
-async fn forward_commands(
-    track: RemoteDataTrack,
-    command_tx: mpsc::Sender<(ParticipantIdentity, CommandMsg)>,
-) {
+async fn forward_commands(track: RemoteDataTrack, command_tx: mpsc::Sender<Received>) {
     let sender = ParticipantIdentity(track.publisher_identity().to_owned());
     // Only the newest command matters, so keep LiveKit from queueing old ones.
     let options = DataTrackSubscribeOptions::new().with_buffer_size(1);
@@ -358,10 +387,25 @@ async fn forward_commands(
         let Ok(command) = CommandMsg::decode(frame.payload()) else {
             continue;
         };
-        if command_tx.send((sender.clone(), command)).await.is_err() {
+        // How late a command is cannot be told without the time it was sent.
+        let Some(delay_ms) = frame.user_timestamp().and_then(delay_since) else {
+            continue;
+        };
+        let received = Received {
+            sender: sender.clone(),
+            command,
+            delay_ms,
+        };
+        if command_tx.send(received).await.is_err() {
             return;
         }
     }
+}
+
+/// Milliseconds from `sent_at_ms`, by the driver's clock, until now, by this one's.
+fn delay_since(sent_at_ms: u64) -> Option<i64> {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?;
+    Some(i64::try_from(now.as_millis()).ok()? - i64::try_from(sent_at_ms).ok()?)
 }
 
 // ----------------------------------------------------------------------------
@@ -472,12 +516,12 @@ impl Driver {
             seq: self.seq,
             payload: payload.into(),
         };
+        // The time it is sent tells the robot whether it arrived late.
+        let frame = DataTrackFrame::new(command.encode_to_vec()).with_user_timestamp_now();
         // A full queue means the track is being published again after a reconnect, and the
         // next command replaces this one. An unpublished track comes after the robot left or
         // the room disconnected, which the next call reports.
-        self.track
-            .try_push(DataTrackFrame::new(command.encode_to_vec()))
-            .ok();
+        self.track.try_push(frame).ok();
         Ok(())
     }
 
@@ -503,54 +547,89 @@ fn is_lease_lost(announced: &str, lease: u64) -> bool {
 mod tests {
     use super::*;
 
-    fn command(lease: u64, seq: u64) -> CommandMsg {
-        CommandMsg {
-            lease,
-            seq,
-            payload: Bytes::from_static(b"forward"),
+    const MAX_LATENESS: Duration = Duration::from_millis(300);
+
+    fn received(sender: &str, lease: u64, seq: u64, delay_ms: i64) -> Received {
+        Received {
+            sender: ParticipantIdentity(sender.to_owned()),
+            command: CommandMsg {
+                lease,
+                seq,
+                payload: Bytes::from_static(b"forward"),
+            },
+            delay_ms,
+        }
+    }
+
+    fn lease_of_alice() -> Lease {
+        Lease {
+            id: 1,
+            holder: ParticipantIdentity("alice".to_owned()),
+            last_seq: None,
+            min_delay_ms: None,
+            last_heard: Instant::now(),
         }
     }
 
     #[test]
     fn only_newer_commands_from_the_holder_are_accepted() {
-        let alice = ParticipantIdentity("alice".to_owned());
-        let bob = ParticipantIdentity("bob".to_owned());
+        let accept = |lease: &mut _, received| accept(lease, &received, MAX_LATENESS);
+        let payload = Some(Bytes::from_static(b"forward"));
 
         assert_eq!(
-            accept(&mut None, &alice, &command(1, 1)),
+            accept(&mut None, received("alice", 1, 1, 0)),
             None,
             "nobody holds the lease"
         );
 
-        let mut lease = Some(Lease {
-            id: 1,
-            holder: alice.clone(),
-            last_seq: None,
-            last_heard: Instant::now(),
-        });
-        let payload = Some(Bytes::from_static(b"forward"));
-        assert_eq!(accept(&mut lease, &alice, &command(1, 5)), payload);
+        let mut lease = Some(lease_of_alice());
+        assert_eq!(accept(&mut lease, received("alice", 1, 5, 0)), payload);
         assert_eq!(
-            accept(&mut lease, &alice, &command(1, 5)),
+            accept(&mut lease, received("alice", 1, 5, 0)),
             None,
             "duplicate"
         );
         assert_eq!(
-            accept(&mut lease, &alice, &command(1, 4)),
+            accept(&mut lease, received("alice", 1, 4, 0)),
             None,
             "out of order"
         );
         assert_eq!(
-            accept(&mut lease, &bob, &command(1, 6)),
+            accept(&mut lease, received("bob", 1, 6, 0)),
             None,
             "not the holder"
         );
         assert_eq!(
-            accept(&mut lease, &alice, &command(2, 6)),
+            accept(&mut lease, received("alice", 2, 6, 0)),
             None,
             "an old lease"
         );
-        assert_eq!(accept(&mut lease, &alice, &command(1, 6)), payload);
+        assert_eq!(accept(&mut lease, received("alice", 1, 6, 0)), payload);
+    }
+
+    #[test]
+    fn a_command_later_than_the_fastest_by_more_than_the_limit_is_lost() {
+        let accept = |lease: &mut _, received| accept(lease, &received, MAX_LATENESS).is_some();
+        let mut lease = Some(lease_of_alice());
+
+        // The driver's clock is five seconds behind the robot's.
+        assert!(accept(&mut lease, received("alice", 1, 1, 5_050)));
+        assert!(
+            accept(&mut lease, received("alice", 1, 2, 5_300)),
+            "within the limit"
+        );
+        assert!(
+            !accept(&mut lease, received("alice", 1, 3, 5_400)),
+            "beyond the limit"
+        );
+        assert!(
+            accept(&mut lease, received("alice", 1, 4, 5_020)),
+            "faster than any before"
+        );
+        assert!(
+            !accept(&mut lease, received("alice", 1, 5, 5_340)),
+            "beyond the limit of the faster one"
+        );
     }
 
     #[test]
@@ -579,6 +658,7 @@ mod tests {
             id: next_id,
             holder: alice.clone(),
             last_seq: None,
+            min_delay_ms: None,
             last_heard: Instant::now(),
         });
         leases.next_id += 1;
