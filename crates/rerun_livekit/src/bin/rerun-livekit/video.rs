@@ -13,8 +13,7 @@ use futures_util::StreamExt as _;
 use image::ImageEncoder as _;
 use itertools::izip;
 use livekit::options::{
-    FrameMetadataFeatures, TrackPublishOptions, VideoCodec, VideoEncoding,
-    compute_appropriate_encoding,
+    FrameMetadataFeatures, VideoCodec, VideoEncoding, compute_appropriate_encoding,
 };
 use livekit::prelude::*;
 use livekit::webrtc::native::yuv_helper;

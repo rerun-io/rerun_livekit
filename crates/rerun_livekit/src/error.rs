@@ -2,7 +2,7 @@ use std::fmt::Write as _;
 
 use livekit::DisconnectReason;
 use livekit::prelude::{PublishError, RoomError, RpcError};
-use livekit_api::access_token::AccessTokenError;
+use livekit_token::AccessTokenError;
 
 /// What can go wrong when joining the room or driving the robot.
 #[derive(thiserror::Error, Debug)]

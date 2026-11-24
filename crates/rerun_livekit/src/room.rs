@@ -1,7 +1,7 @@
 //! Joining the LiveKit room.
 
 use livekit::prelude::*;
-use livekit_api::access_token::{AccessToken, VideoGrants};
+use livekit_token::{AccessToken, VideoGrants};
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use crate::{Error, Result};

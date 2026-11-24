@@ -472,7 +472,9 @@ impl Driver {
             seq: self.seq,
             payload: payload.into(),
         };
-        // A full queue means the previous command is still going out. The next one replaces this.
+        // A full queue means the track is being published again after a reconnect, and the
+        // next command replaces this one. An unpublished track comes after the robot left or
+        // the room disconnected, which the next call reports.
         self.track
             .try_push(DataTrackFrame::new(command.encode_to_vec()))
             .ok();
