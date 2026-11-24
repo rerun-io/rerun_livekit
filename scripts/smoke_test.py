@@ -287,6 +287,9 @@ def check_control() -> None:
 
     os.write(carol_terminal, b"q")
     os.waitpid(carol, 0)
+    # Well within the robot's 300 ms watchdog, so it is the release that stopped it.
+    time.sleep(0.2)
+    check(newest_command(commands) == b"", "a driver that quits stops the robot at once")
 
 
 def main() -> None:
