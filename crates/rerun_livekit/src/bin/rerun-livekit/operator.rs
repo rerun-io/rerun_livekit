@@ -57,7 +57,7 @@ pub struct OperatorArgs {
 /// Always, with what ended the session.
 pub async fn run_session(args: &OperatorArgs) -> anyhow::Result<Infallible> {
     let mut viewer = crate::proxy::connect(&args.viewer).await?;
-    let (room, events) = args.room.connect(Role::Operator).await?;
+    let (room, mut events) = args.room.connect(Role::Operator).await?;
     log::info!("Forwarding the room to {}", args.viewer);
 
     let latency_plots = if args.plot_latency {
@@ -67,18 +67,19 @@ pub async fn run_session(args: &OperatorArgs) -> anyhow::Result<Infallible> {
     };
     let (viewer_tx, viewer_rx) = mpsc::channel(VIEWER_QUEUE_CAPACITY);
     let result = tokio::select! {
-        result = handle_room_events(events, viewer_tx, latency_plots) => result,
+        result = handle_room_events(&mut events, viewer_tx, latency_plots) => result,
         result = viewer.write_messages(ReceiverStream::new(viewer_rx)) => match result {
             Ok(_) => Err(anyhow::anyhow!("The viewer closed the stream")),
             Err(status) => Err(status).context("Lost the viewer"),
         },
-    };
+    }
+    .map_err(|err| crate::session_error(err, &mut events));
     room.close().await.ok();
     result
 }
 
 async fn handle_room_events(
-    mut events: mpsc::UnboundedReceiver<RoomEvent>,
+    events: &mut mpsc::UnboundedReceiver<RoomEvent>,
     viewer_tx: mpsc::Sender<WriteMessagesRequest>,
     latency_plots: LatencyPlots,
 ) -> anyhow::Result<Infallible> {

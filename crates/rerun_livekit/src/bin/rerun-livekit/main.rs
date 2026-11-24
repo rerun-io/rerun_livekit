@@ -18,6 +18,8 @@ use std::convert::Infallible;
 use std::time::Duration;
 
 use clap::Parser as _;
+use livekit::prelude::RoomEvent;
+use tokio::sync::mpsc::UnboundedReceiver;
 
 /// How long to wait before starting a new session after one ended.
 const SESSION_RETRY_DELAY: Duration = Duration::from_secs(2);
@@ -62,6 +64,21 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
+/// The error that ended a session, or the room's own disconnect if that is what ended it.
+///
+/// LiveKit queues its `Disconnected` event before it closes the connection, so when being
+/// disconnected made the session fail, for example by failing a send, the event is already
+/// in `events`, whichever branch of the session saw the failure first. Call it before closing
+/// the room, which queues a `Disconnected` of its own.
+fn session_error(err: anyhow::Error, events: &mut UnboundedReceiver<RoomEvent>) -> anyhow::Error {
+    while let Ok(event) = events.try_recv() {
+        if let RoomEvent::Disconnected { reason } = event {
+            return rerun_livekit::Error::Disconnected { reason }.into();
+        }
+    }
+    err
+}
+
 /// Runs sessions back to back, until another participant takes this one's place in the room.
 ///
 /// Starting over is the only recovery mechanism: a new session reconnects both ends, and
@@ -80,5 +97,39 @@ where
         }
         log::warn!("Session ended, starting a new one in {SESSION_RETRY_DELAY:?}: {err:#}");
         tokio::time::sleep(SESSION_RETRY_DELAY).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use livekit::DisconnectReason;
+    use tokio::sync::mpsc;
+
+    use super::*;
+
+    #[test]
+    fn a_queued_disconnect_is_what_ended_the_session() {
+        let (events_tx, mut events) = mpsc::unbounded_channel();
+        events_tx.send(RoomEvent::Reconnecting).unwrap();
+        events_tx
+            .send(RoomEvent::Disconnected {
+                reason: DisconnectReason::DuplicateIdentity,
+            })
+            .unwrap();
+
+        let err = session_error(anyhow::anyhow!("Failed to send"), &mut events);
+        assert!(
+            err.downcast_ref::<rerun_livekit::Error>()
+                .is_some_and(rerun_livekit::Error::is_replaced)
+        );
+    }
+
+    #[test]
+    fn without_a_disconnect_the_error_stays() {
+        let (events_tx, mut events) = mpsc::unbounded_channel();
+        events_tx.send(RoomEvent::Reconnecting).unwrap();
+
+        let err = session_error(anyhow::anyhow!("Lost the Rerun proxy"), &mut events);
+        assert_eq!(err.to_string(), "Lost the Rerun proxy");
     }
 }

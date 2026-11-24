@@ -96,8 +96,10 @@ pub async fn run_session(args: &RobotArgs) -> anyhow::Result<Infallible> {
         Some(path) => Rules::load(path, default_video)?,
         None => Rules::new(default_video),
     };
-    let (room, events) = args.room.connect(Role::Robot).await?;
-    let result = forward(args, &rules, &room, events).await;
+    let (room, mut events) = args.room.connect(Role::Robot).await?;
+    let result = forward(args, &rules, &room, &mut events)
+        .await
+        .map_err(|err| crate::session_error(err, &mut events));
     room.close().await.ok();
     result
 }
@@ -106,7 +108,7 @@ async fn forward(
     args: &RobotArgs,
     rules: &Rules,
     room: &Room,
-    mut events: mpsc::UnboundedReceiver<RoomEvent>,
+    events: &mut mpsc::UnboundedReceiver<RoomEvent>,
 ) -> anyhow::Result<Infallible> {
     let mut log_msgs = crate::proxy::connect(&args.proxy)
         .await?
