@@ -39,7 +39,11 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    rerun_livekit::init_logging(log::LevelFilter::Warn);
+    // LiveKit's `libwebrtc` warns on every healthy connection. `RUST_LOG` overrides this.
+    env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or("warn,libwebrtc=off"),
+    )
+    .init();
     let args = Args::parse();
 
     let mut driver = Driver::acquire(&args.room).await?;
@@ -60,13 +64,12 @@ async fn drive(driver: &mut Driver, args: &Args) -> anyhow::Result<()> {
     let mut keys = EventStream::new();
     let mut tick = tokio::time::interval(COMMAND_INTERVAL);
 
-    // Forward, to the left, and turning left: each is -1, 0 or 1.
-    let mut motion = [0.0_f32; 3];
+    let mut motion = Motion::default();
 
     loop {
         tokio::select! {
             _ = tick.tick() => {
-                let [forward, left, turn] = motion;
+                let Motion { forward, left, turn } = motion;
                 let command = [
                     forward * args.linear_speed,
                     left * args.linear_speed,
@@ -88,21 +91,31 @@ async fn drive(driver: &mut Driver, args: &Args) -> anyhow::Result<()> {
                     KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => return Ok(()),
                     KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
                     KeyCode::Char(' ') => {
-                        motion = [0.0; 3];
+                        motion = Motion::default();
                         continue;
                     }
-                    KeyCode::Char('w') => (0, 1.0),
-                    KeyCode::Char('x') => (0, -1.0),
-                    KeyCode::Char('z') => (1, 1.0),
-                    KeyCode::Char('c') => (1, -1.0),
-                    KeyCode::Char('a') => (2, 1.0),
-                    KeyCode::Char('d') => (2, -1.0),
+                    KeyCode::Char('w') => (&mut motion.forward, 1.0),
+                    KeyCode::Char('x') => (&mut motion.forward, -1.0),
+                    KeyCode::Char('z') => (&mut motion.left, 1.0),
+                    KeyCode::Char('c') => (&mut motion.left, -1.0),
+                    KeyCode::Char('a') => (&mut motion.turn, 1.0),
+                    KeyCode::Char('d') => (&mut motion.turn, -1.0),
                     _ => continue,
                 };
-                motion[axis] = (motion[axis] + step).clamp(-1.0, 1.0);
+                *axis = (*axis + step).clamp(-1.0, 1.0);
             }
         }
     }
+}
+
+/// How the keys say the robot should move. Each axis is -1, 0 or 1.
+#[derive(Clone, Copy, Default)]
+struct Motion {
+    forward: f32,
+    left: f32,
+
+    /// Counter-clockwise.
+    turn: f32,
 }
 
 /// Puts the terminal in raw mode, so keys arrive without Enter, until dropped.

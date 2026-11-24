@@ -4,7 +4,7 @@ categories = ["network-programming", "science::robotics", "visualization"]
 description = "Bridge any Rerun stream through LiveKit, for remote live viewing and teleoperation"
 edition.workspace = true
 homepage.workspace = true
-include = ["LICENSE-APACHE", "LICENSE-MIT", "**/*.rs", "Cargo.toml"]
+include = ["LICENSE-APACHE", "LICENSE-MIT", "**/*.rs", "Cargo.toml", "example-rules.toml"]
 keywords.workspace = true
 license.workspace = true
 name = "rerun_livekit"
@@ -24,7 +24,7 @@ targets = ["x86_64-unknown-linux-gnu"]
 
 [[bin]]
 name = "rerun-livekit"
-path = "src/main.rs"
+path = "src/bin/rerun-livekit/main.rs"
 
 
 [dependencies]
@@ -50,6 +50,7 @@ parking_lot.workspace = true
 prost.workspace = true
 rand.workspace = true
 serde.workspace = true
+thiserror.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
 toml.workspace = true

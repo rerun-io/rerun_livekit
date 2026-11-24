@@ -1,4 +1,4 @@
-//! Log setup shared by the command line and the examples.
+//! Log setup for the bridge.
 
 /// Log filters for LiveKit, used when `RUST_LOG` is not set.
 ///

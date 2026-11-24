@@ -18,8 +18,10 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::latency::{LatencyPlots, LatencyReport};
-use crate::room::{LATEST_TRACK, LOG_TOPIC, LatestFrame, Role, RoomArgs};
+use rerun_livekit::{Role, RoomArgs};
+
 use crate::video::{TRACK_INFO_TOPIC, TrackInfos};
+use crate::wire::{LATEST_TRACK, LOG_TOPIC, LatestFrame};
 
 /// How many messages may wait for the viewer before the bridge stops reading from the room.
 const VIEWER_QUEUE_CAPACITY: usize = 1024;

@@ -19,13 +19,13 @@ use re_protos::sdk_comms::v1alpha1::ReadMessagesRequest;
 use rerun::external::re_log_encoding::rrd::Compression;
 use rerun::external::re_uri::ProxyUri;
 use rerun::log::Chunk;
+use rerun_livekit::{Role, RoomArgs};
 use tokio::sync::mpsc;
 
 use crate::classify::{Retention, Route, StreamKey, Temporal, classify};
-use crate::control::send_commands_to_udp;
-use crate::room::{LATEST_TRACK, LOG_TOPIC, LatestFrame, Role, RoomArgs};
 use crate::rules::{Delivery, Rules, Video};
 use crate::video::{EncoderLimits, Sent, TRACK_INFO_TOPIC, VideoCodecArg, VideoPublisher};
+use crate::wire::{LATEST_TRACK, LOG_TOPIC, LatestFrame};
 
 /// The largest message the latest lane can carry.
 ///
@@ -80,23 +80,10 @@ pub struct RobotArgs {
     /// Send the driver's commands to this UDP address, as the bytes the driver sent, for a
     /// robot stack that is not written in Rust. An empty datagram means stop.
     #[arg(long)]
-    commands_to_udp: Option<SocketAddr>,
+    pub commands_to_udp: Option<SocketAddr>,
 
     #[command(flatten)]
-    room: RoomArgs,
-}
-
-/// Starts sending the driver's commands to `--commands-to-udp`, if that is set.
-///
-/// Call it once. It keeps running across sessions.
-///
-/// # Errors
-/// If the UDP socket cannot be opened.
-pub fn start_command_forwarding(args: &RobotArgs) -> anyhow::Result<()> {
-    let Some(to) = args.commands_to_udp else {
-        return Ok(());
-    };
-    send_commands_to_udp(args.room.clone().with_identity_suffix("-control"), to)
+    pub room: RoomArgs,
 }
 
 /// Runs one session, which lasts until the proxy or the room goes away.

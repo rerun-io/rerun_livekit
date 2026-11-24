@@ -93,7 +93,7 @@ export LIVEKIT_URL=ws://<robot>:7880                               # on the oper
   A relayed one runs on TCP, which brings back the stalls that WebRTC avoids.
 
 Every command also takes `--url`, `--api-key`, `--api-secret` and `--room`.
-Two participants of the same kind, such as two operators, each need their own `--identity`.
+Two participants of the same kind, such as two operators, each need their own `--name`.
 For a web Viewer on the operator side, run `rerun --serve-web` there and pass its proxy address as `--viewer`.
 
 ## How data travels
@@ -180,7 +180,7 @@ On the operator side, save from the Viewer, or run a second operator that writes
 
 ```sh
 rerun --save operator.rrd --port 9878
-cargo run --release -- operator --identity recorder --plot-latency --viewer rerun+http://127.0.0.1:9878/proxy
+cargo run --release -- operator --name recorder --plot-latency --viewer rerun+http://127.0.0.1:9878/proxy
 ```
 
 ### Both ends in one segment
@@ -215,6 +215,15 @@ It follows LiveKit's [teleoperation pattern](https://docs.livekit.io/robotics/te
 - The robot stops when commands stop arriving.
   From then on another driver may take the lease.
 
+Both ends join the room with a `RoomArgs`.
+A program with its own command line can `#[command(flatten)]` it, as [`keyboard_teleop`](crates/rerun_livekit/examples/keyboard_teleop.rs) does, which gives it `--url`, `--room` and the rest.
+Other code builds one:
+
+```rust
+let room_args = rerun_livekit::RoomArgs::new("wss://<project>.livekit.cloud", api_key, api_secret, "rerun")
+    .with_name("alice");
+```
+
 On the operator's side:
 
 ```rust
@@ -228,7 +237,9 @@ loop {
 On the robot:
 
 ```rust
-let command = rerun_livekit::control::receive_commands(room_args, Duration::from_millis(300));
+use rerun_livekit::control::{DEFAULT_WATCHDOG_TIMEOUT, receive_commands};
+
+let command = receive_commands(room_args, DEFAULT_WATCHDOG_TIMEOUT);
 loop {
     match command.borrow().as_deref() {
         Some(bytes) => { /* decode and follow */ }

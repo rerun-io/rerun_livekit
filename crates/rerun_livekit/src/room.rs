@@ -1,23 +1,10 @@
-//! Joining the LiveKit room, and the names the two sides of the bridge share in it.
+//! Joining the LiveKit room.
 
-use anyhow::Context as _;
 use livekit::prelude::*;
 use livekit_api::access_token::{AccessToken, VideoGrants};
 use tokio::sync::mpsc::UnboundedReceiver;
 
-/// Topic of the byte streams that carry guaranteed Rerun log messages.
-pub const LOG_TOPIC: &str = "rerun.log";
-
-/// Name of the data track that carries latest-wins Rerun log messages, as [`LatestFrame`]s.
-pub const LATEST_TRACK: &str = "rerun.latest";
-
-/// One frame of [`LATEST_TRACK`]: the latest-wins messages that were logged together.
-#[derive(Clone, PartialEq, Eq, prost::Message)]
-pub struct LatestFrame {
-    /// Encoded log messages.
-    #[prost(bytes = "bytes", repeated, tag = "1")]
-    pub log_msgs: Vec<bytes::Bytes>,
-}
+use crate::{Error, Result};
 
 /// Participant attribute holding a [`Role`].
 const ROLE_ATTRIBUTE: &str = "rerun.role";
@@ -83,40 +70,59 @@ pub struct RoomArgs {
     #[arg(long, default_value = "rerun")]
     room: String,
 
-    /// Identity in the room. Must be unique among participants.
+    /// A name for this machine or person, to tell two participants with the same role apart.
+    /// The identity in the room is the name, a dash, and the role, for example `alice-driver`.
     #[arg(long)]
-    identity: Option<String>,
+    name: Option<String>,
 }
 
 impl RoomArgs {
-    /// The same room for another participant of this process, which needs its own identity.
-    #[must_use]
-    pub fn with_identity_suffix(mut self, suffix: &str) -> Self {
-        if let Some(identity) = &mut self.identity {
-            identity.push_str(suffix);
+    /// A room on a LiveKit server, for code that does not take these from the command line.
+    pub fn new(
+        url: impl Into<String>,
+        api_key: impl Into<String>,
+        api_secret: impl Into<String>,
+        room: impl Into<String>,
+    ) -> Self {
+        Self {
+            url: url.into(),
+            api_key: api_key.into(),
+            api_secret: api_secret.into(),
+            room: room.into(),
+            name: None,
         }
+    }
+
+    /// Joins as `<name>-<role>` instead of `<role>`, to tell two participants with the same
+    /// role apart.
+    #[must_use]
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
         self
     }
 
-    /// Joins the room with a locally minted token.
+    /// Joins the room as `role`, with a locally minted token.
+    ///
+    /// The identity in the room is the role, or `<name>-<role>` with `--name`. One process can
+    /// join once per role, and two processes with the same role need different names.
     ///
     /// # Errors
     /// If the token cannot be made or the room cannot be reached.
-    pub async fn connect(
-        &self,
-        role: Role,
-    ) -> anyhow::Result<(Room, UnboundedReceiver<RoomEvent>)> {
+    pub async fn connect(&self, role: Role) -> Result<(Room, UnboundedReceiver<RoomEvent>)> {
         let Self {
             url,
             api_key,
             api_secret,
             room,
-            identity,
+            name,
         } = self;
-        let identity = identity.as_deref().unwrap_or(role.as_str());
+        let identity = match name {
+            Some(name) => format!("{name}-{}", role.as_str()),
+            None => role.as_str().to_owned(),
+        };
 
         let token = AccessToken::with_api_key(api_key, api_secret)
-            .with_identity(identity)
+            .with_identity(&identity)
             .with_attributes([(ROLE_ATTRIBUTE, role.as_str())])
             .with_grants(VideoGrants {
                 room_join: true,
@@ -126,7 +132,7 @@ impl RoomArgs {
                 ..Default::default()
             })
             .to_jwt()
-            .context("Failed to create the LiveKit access token")?;
+            .map_err(|source| Error::Token { source })?;
 
         let mut options = RoomOptions::default();
         // Only the operator shows the robot's video. Nobody else should pay to receive it.
@@ -135,6 +141,11 @@ impl RoomArgs {
         options.dynacast = role == Role::Robot;
         Room::connect(url, &token, options)
             .await
-            .with_context(|| format!("Failed to join room {room:?} as {identity:?} at {url}"))
+            .map_err(|source| Error::Connect {
+                room: room.clone(),
+                identity,
+                url: url.clone(),
+                source,
+            })
     }
 }

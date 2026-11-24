@@ -335,7 +335,7 @@ mod tests {
 
     #[test]
     fn the_example_file_is_valid() {
-        Rules::parse(include_str!("../example-rules.toml"), Video::Allowed).unwrap();
+        Rules::parse(include_str!("../../../example-rules.toml"), Video::Allowed).unwrap();
     }
 
     #[test]
