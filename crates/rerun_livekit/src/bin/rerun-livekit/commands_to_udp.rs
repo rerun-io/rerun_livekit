@@ -1,7 +1,7 @@
 //! `rerun-livekit robot --commands-to-udp`: hands the driver's commands to a robot stack that is
 //! not written in Rust.
 
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 
 use anyhow::Context as _;
@@ -20,7 +20,13 @@ const SEND_INTERVAL: Duration = Duration::from_millis(33);
 ///
 /// Call it once. It keeps running across sessions of the bridge.
 pub async fn start(room: RoomArgs, to: SocketAddr) -> anyhow::Result<()> {
-    let socket = UdpSocket::bind("0.0.0.0:0")
+    // The socket has to be of the same address family as `to`.
+    let local: SocketAddr = if to.is_ipv6() {
+        (Ipv6Addr::UNSPECIFIED, 0).into()
+    } else {
+        (Ipv4Addr::UNSPECIFIED, 0).into()
+    };
+    let socket = UdpSocket::bind(local)
         .await
         .context("Failed to open a UDP socket")?;
     let command = receive_commands(room, DEFAULT_WATCHDOG_TIMEOUT);
