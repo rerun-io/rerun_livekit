@@ -1,9 +1,12 @@
+use std::fmt::Write as _;
+
 use livekit::DisconnectReason;
 use livekit::prelude::{PublishError, RoomError, RpcError};
 use livekit_api::access_token::AccessTokenError;
 
 /// What can go wrong when joining the room or driving the robot.
 #[derive(thiserror::Error, Debug)]
+#[non_exhaustive]
 pub enum Error {
     #[error("Failed to create the LiveKit access token")]
     Token { source: AccessTokenError },
@@ -33,7 +36,10 @@ pub enum Error {
     LeaseRefused { source: RpcError },
 
     #[error("The robot returned an invalid lease {lease:?}")]
-    InvalidLease { lease: String },
+    InvalidLease {
+        lease: String,
+        source: std::num::ParseIntError,
+    },
 
     /// The robot gave the lease to another driver, for example after it restarted.
     #[error("Lost the lease")]
@@ -44,3 +50,35 @@ pub enum Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+/// `err` followed by each of its causes, separated by `": "`.
+///
+/// [`Error`]'s `Display` is only the top line, as is usual in Rust, so that reporters like
+/// `anyhow` can print the causes without repeating them. Logs of this crate use this instead.
+pub fn with_causes(err: &dyn std::error::Error) -> String {
+    let mut text = err.to_string();
+    let mut source = err.source();
+    while let Some(cause) = source {
+        write!(text, ": {cause}").ok();
+        source = cause.source();
+    }
+    text
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn causes_follow_the_top_line() {
+        let source = "x".parse::<u64>().unwrap_err();
+        let err = Error::InvalidLease {
+            lease: "x".to_owned(),
+            source,
+        };
+        assert_eq!(
+            with_causes(&err),
+            "The robot returned an invalid lease \"x\": invalid digit found in string"
+        );
+    }
+}

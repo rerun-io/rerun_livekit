@@ -22,6 +22,7 @@ use prost::Message as _;
 use tokio::sync::{mpsc, watch};
 use tokio::time::Instant;
 
+use crate::error::with_causes;
 use crate::room::{Role, RoomArgs};
 use crate::{Error, Result};
 
@@ -92,7 +93,10 @@ pub fn receive_commands(
         loop {
             let Err(err) = receive_session(&room, watchdog_timeout, &current_tx).await;
             current_tx.send_replace(None);
-            log::warn!("Command session ended, starting a new one in {RETRY_DELAY:?}: {err:#}");
+            log::warn!(
+                "Command session ended, starting a new one in {RETRY_DELAY:?}: {}",
+                with_causes(&err)
+            );
             tokio::time::sleep(RETRY_DELAY).await;
         }
     });
@@ -322,13 +326,16 @@ impl Driver {
             .local_participant()
             .perform_rpc(PerformRpcData::new(robot.clone(), ACQUIRE_METHOD))
             .await
-            .map_err(|source| match source.data {
-                Some(holder) if source.code == LEASE_HELD_ERROR => Error::LeaseHeld { holder },
+            .map_err(|source| match source.data.clone() {
+                // LiveKit turns a missing `data` into an empty string.
+                Some(holder) if source.code == LEASE_HELD_ERROR && !holder.is_empty() => {
+                    Error::LeaseHeld { holder }
+                }
                 _ => Error::LeaseRefused { source },
             })?;
         let lease = lease
             .parse()
-            .map_err(|_err| Error::InvalidLease { lease })?;
+            .map_err(|source| Error::InvalidLease { lease, source })?;
         let track = room
             .local_participant()
             .publish_data_track(COMMAND_TRACK)
