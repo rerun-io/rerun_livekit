@@ -93,6 +93,7 @@ export LIVEKIT_URL=ws://<robot>:7880                               # on the oper
   A relayed one runs on TCP, which brings back the stalls that WebRTC avoids.
 
 Every command also takes `--url`, `--api-key`, `--api-secret` and `--room`.
+Each one makes its own access token from the key and secret, which let anyone join any room of the LiveKit project as anyone, so give them only to machines you would trust to drive the robot.
 A room holds one robot, and any number of operators.
 Give each robot its own room, and no `--name`: then a second robot in the same room pushes the first one out instead of mixing in.
 The robot that was pushed out exits with an error. Don't have a supervisor restart it on that error, or the two robots take turns pushing each other out.
