@@ -5,6 +5,7 @@
 
 mod classify;
 mod latency;
+mod logging;
 mod operator;
 mod proxy;
 mod robot;
@@ -32,7 +33,7 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    rerun_livekit::init_logging(log::LevelFilter::Info);
+    logging::init_logging(log::LevelFilter::Info);
 
     let command = Command::parse();
     if matches!(command, Command::Operator(_)) {

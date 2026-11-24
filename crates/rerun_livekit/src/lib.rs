@@ -7,9 +7,7 @@
 
 pub mod control;
 mod error;
-mod logging;
 mod room;
 
 pub use self::error::{Error, Result};
-pub use self::logging::init_logging;
 pub use self::room::{Role, RoomArgs};

@@ -39,7 +39,11 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    rerun_livekit::init_logging(log::LevelFilter::Warn);
+    // LiveKit's `libwebrtc` warns on every healthy connection. `RUST_LOG` overrides this.
+    env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or("warn,libwebrtc=off"),
+    )
+    .init();
     let args = Args::parse();
 
     let mut driver = Driver::acquire(&args.room).await?;
