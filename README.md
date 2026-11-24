@@ -228,7 +228,9 @@ loop {
 On the robot:
 
 ```rust
-let command = rerun_livekit::control::receive_commands(room_args, Duration::from_millis(300));
+use rerun_livekit::control::{DEFAULT_WATCHDOG_TIMEOUT, receive_commands};
+
+let command = receive_commands(room_args, DEFAULT_WATCHDOG_TIMEOUT);
 loop {
     match command.borrow().as_deref() {
         Some(bytes) => { /* decode and follow */ }
