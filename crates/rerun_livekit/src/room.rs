@@ -96,7 +96,7 @@ pub struct RoomArgs {
 }
 
 fn random_name() -> String {
-    format!("{:04x}", rand::random::<u16>())
+    format!("{:08x}", rand::random::<u32>())
 }
 
 impl RoomArgs {
@@ -117,8 +117,8 @@ impl RoomArgs {
         }
     }
 
-    /// Joins as `<name>-<role>` instead of `<role>`, to tell two participants with the same
-    /// role apart.
+    /// Joins as `<name>-<role>`, in place of a random name for operators and drivers, and of the
+    /// bare role for the robot's roles.
     #[must_use]
     pub fn with_name(mut self, name: impl Into<String>) -> Self {
         self.name = Some(name.into());
