@@ -93,7 +93,7 @@ export LIVEKIT_URL=ws://<robot>:7880                               # on the oper
   A relayed one runs on TCP, which brings back the stalls that WebRTC avoids.
 
 Every command also takes `--url`, `--api-key`, `--api-secret` and `--room`.
-Two participants of the same kind, such as two operators, each need their own `--identity`.
+Two participants of the same kind, such as two operators, each need their own `--name`.
 For a web Viewer on the operator side, run `rerun --serve-web` there and pass its proxy address as `--viewer`.
 
 ## How data travels
@@ -180,7 +180,7 @@ On the operator side, save from the Viewer, or run a second operator that writes
 
 ```sh
 rerun --save operator.rrd --port 9878
-cargo run --release -- operator --identity recorder --plot-latency --viewer rerun+http://127.0.0.1:9878/proxy
+cargo run --release -- operator --name recorder --plot-latency --viewer rerun+http://127.0.0.1:9878/proxy
 ```
 
 ### Both ends in one segment

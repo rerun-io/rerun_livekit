@@ -4834,6 +4834,7 @@ dependencies = [
  "re_protos",
  "rerun",
  "serde",
+ "thiserror 2.0.21",
  "tokio",
  "tokio-stream",
  "toml",

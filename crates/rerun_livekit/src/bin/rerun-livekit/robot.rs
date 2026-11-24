@@ -19,10 +19,12 @@ use re_protos::sdk_comms::v1alpha1::ReadMessagesRequest;
 use rerun::external::re_log_encoding::rrd::Compression;
 use rerun::external::re_uri::ProxyUri;
 use rerun::log::Chunk;
+use rerun_livekit::control::{DEFAULT_WATCHDOG_TIMEOUT, receive_commands};
+use rerun_livekit::{Role, RoomArgs};
+use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
 use crate::classify::{Retention, Route, StreamKey, Temporal, classify};
-use rerun_livekit::{Role, RoomArgs};
 
 use crate::rules::{Delivery, Rules, Video};
 use crate::video::{EncoderLimits, Sent, TRACK_INFO_TOPIC, VideoCodecArg, VideoPublisher};
@@ -40,6 +42,9 @@ const MAX_BURST_MESSAGES: usize = 256;
 
 /// How often to report what was dropped and to remove idle video tracks.
 const REPORT_INTERVAL: Duration = Duration::from_secs(10);
+
+/// How often `--commands-to-udp` sends the current command.
+const UDP_SEND_INTERVAL: Duration = Duration::from_millis(33);
 
 #[derive(Clone, Debug, clap::Args)]
 pub struct RobotArgs {
@@ -89,18 +94,32 @@ pub struct RobotArgs {
 
 /// Starts sending the driver's commands to `--commands-to-udp`, if that is set.
 ///
-/// Call it once. It keeps running across sessions.
+/// Sends the command the robot should follow right now, at a fixed rate, as the bytes the
+/// driver sent. An empty datagram means stop: nobody is driving, or the driver's commands
+/// stopped arriving. The receiver must also stop when datagrams stop, which covers this
+/// program dying.
 ///
-/// # Errors
-/// If the UDP socket cannot be opened.
-pub fn start_command_forwarding(args: &RobotArgs) -> anyhow::Result<()> {
+/// Call it once. It keeps running across sessions.
+pub async fn start_command_forwarding(args: &RobotArgs) -> anyhow::Result<()> {
     let Some(to) = args.commands_to_udp else {
         return Ok(());
     };
-    rerun_livekit::control::send_commands_to_udp(
-        args.room.clone().with_identity_suffix("-control"),
-        to,
-    )
+    let socket = UdpSocket::bind("0.0.0.0:0")
+        .await
+        .context("Failed to open a UDP socket")?;
+    let command = receive_commands(args.room.clone(), DEFAULT_WATCHDOG_TIMEOUT);
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(UDP_SEND_INTERVAL);
+        loop {
+            tick.tick().await;
+            let datagram = command.borrow().clone().unwrap_or_default();
+            // Nothing listening is not fatal: the robot stack may start after this program.
+            if let Err(err) = socket.send_to(&datagram, to).await {
+                log::debug!("Failed to send the command to {to}: {err}");
+            }
+        }
+    });
+    Ok(())
 }
 
 /// Runs one session, which lasts until the proxy or the room goes away.

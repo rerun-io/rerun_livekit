@@ -11,11 +11,9 @@
 //!   the lease, so a driver that crashed does not lock everyone else out.
 
 use std::collections::HashMap;
-use std::net::{SocketAddr, UdpSocket};
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Context as _;
 use bytes::Bytes;
 use futures_util::StreamExt as _;
 use livekit::prelude::*;
@@ -25,6 +23,7 @@ use tokio::sync::{mpsc, watch};
 use tokio::time::Instant;
 
 use crate::room::{Role, RoomArgs};
+use crate::{Error, Result};
 
 /// Name of the data track a driver publishes its [`CommandMsg`]s on.
 const COMMAND_TRACK: &str = "teleop.cmd";
@@ -38,17 +37,16 @@ const RELEASE_METHOD: &str = "teleop.release";
 /// Attribute of the robot's participant that names the driver holding the lease.
 const HOLDER_ATTRIBUTE: &str = "teleop.holder";
 
-/// RPC error code for "another driver holds the lease". LiveKit reserves 1000 and up.
+/// RPC error code for "another driver holds the lease", with the holder as its data.
+/// LiveKit reserves 1000 and up.
 const LEASE_HELD_ERROR: u32 = 1;
 
 /// How long the robot waits before it starts a new session after losing the room.
 const RETRY_DELAY: Duration = Duration::from_secs(2);
 
-/// How often [`send_commands_to_udp`] sends the current command.
-const UDP_SEND_INTERVAL: Duration = Duration::from_millis(33);
-
-/// [`send_commands_to_udp`] tells the robot to stop when commands stop arriving for this long.
-const UDP_WATCHDOG_TIMEOUT: Duration = Duration::from_millis(300);
+/// A watchdog timeout for [`receive_commands`] that suits a driver sending at 30 Hz: about ten
+/// lost commands in a row stop the robot.
+pub const DEFAULT_WATCHDOG_TIMEOUT: Duration = Duration::from_millis(300);
 
 /// What a driver sends, many times a second.
 #[derive(Clone, PartialEq, prost::Message)]
@@ -101,37 +99,11 @@ pub fn receive_commands(
     current_rx
 }
 
-/// Joins the room and hands the commands to a robot stack that is not written in Rust.
-///
-/// Sends the command the robot should follow right now to `to`, at a fixed rate, as the bytes
-/// the driver sent. An empty datagram means stop: nobody is driving, or the driver's commands
-/// stopped arriving. The receiver must also stop when datagrams stop, which covers this
-/// program dying.
-///
-/// # Errors
-/// If the UDP socket cannot be opened.
-pub fn send_commands_to_udp(room: RoomArgs, to: SocketAddr) -> anyhow::Result<()> {
-    let socket = UdpSocket::bind("0.0.0.0:0").context("Failed to open a UDP socket")?;
-    let command = receive_commands(room, UDP_WATCHDOG_TIMEOUT);
-    tokio::spawn(async move {
-        let mut tick = tokio::time::interval(UDP_SEND_INTERVAL);
-        loop {
-            tick.tick().await;
-            let datagram = command.borrow().clone().unwrap_or_default();
-            // Nothing listening is not fatal: the robot stack may start after this program.
-            if let Err(err) = socket.send_to(&datagram, to) {
-                log::debug!("Failed to send the command to {to}: {err}");
-            }
-        }
-    });
-    Ok(())
-}
-
 async fn receive_session(
     room_args: &RoomArgs,
     watchdog_timeout: Duration,
     current_tx: &watch::Sender<Option<Bytes>>,
-) -> anyhow::Result<std::convert::Infallible> {
+) -> Result<std::convert::Infallible> {
     let (room, mut events) = room_args.connect(Role::RobotControl).await?;
     let local = room.local_participant();
     let lease = Arc::new(Mutex::new(None::<Lease>));
@@ -161,11 +133,9 @@ async fn receive_session(
                         current_tx.send_replace(None);
                     }
                 }
-                Some(RoomEvent::Disconnected { reason }) => {
-                    break Err(anyhow::anyhow!("Disconnected from the room: {reason:?}"));
-                }
+                Some(RoomEvent::Disconnected { reason }) => break Err(Error::Disconnected { reason }),
                 Some(_) => {}
-                None => break Err(anyhow::anyhow!("The room closed")),
+                None => break Err(Error::RoomClosed),
             },
 
             Some((sender, command)) = command_rx.recv() => {
@@ -236,7 +206,8 @@ fn register_lease_methods(
                     });
                     if let Some(held) = driving {
                         let message = format!("{} is driving", held.holder);
-                        return Err(RpcError::new(LEASE_HELD_ERROR, message, None));
+                        let holder = held.holder.to_string();
+                        return Err(RpcError::new(LEASE_HELD_ERROR, message, Some(holder)));
                     }
                     let id = rand::random();
                     *lease = Some(Lease {
@@ -325,8 +296,9 @@ impl Driver {
     /// Joins the room and takes the lease.
     ///
     /// # Errors
-    /// If another driver holds the lease, or the room cannot be reached.
-    pub async fn acquire(room_args: &RoomArgs) -> anyhow::Result<Self> {
+    /// [`Error::LeaseHeld`] if another driver holds the lease, or another [`Error`] if the
+    /// room cannot be reached.
+    pub async fn acquire(room_args: &RoomArgs) -> Result<Self> {
         let (room, mut events) = room_args.connect(Role::Driver).await?;
 
         let is_robot =
@@ -337,7 +309,7 @@ impl Driver {
             log::info!("Waiting for the robot to join the room");
             loop {
                 if let RoomEvent::ParticipantActive(participant) =
-                    events.recv().await.context("The room closed")?
+                    events.recv().await.ok_or(Error::RoomClosed)?
                     && is_robot(&participant)
                 {
                     break participant;
@@ -350,14 +322,18 @@ impl Driver {
             .local_participant()
             .perform_rpc(PerformRpcData::new(robot.clone(), ACQUIRE_METHOD))
             .await
-            .map_err(|err| anyhow::anyhow!("The robot refused the lease: {}", err.message))?
+            .map_err(|source| match source.data {
+                Some(holder) if source.code == LEASE_HELD_ERROR => Error::LeaseHeld { holder },
+                _ => Error::LeaseRefused { source },
+            })?;
+        let lease = lease
             .parse()
-            .context("The robot returned an invalid lease")?;
+            .map_err(|_err| Error::InvalidLease { lease })?;
         let track = room
             .local_participant()
             .publish_data_track(COMMAND_TRACK)
             .await
-            .context("Failed to publish the command track")?;
+            .map_err(|source| Error::PublishCommandTrack { source })?;
 
         Ok(Self {
             room,
@@ -376,8 +352,9 @@ impl Driver {
     /// one packet and a single lost packet cannot cost more than one command.
     ///
     /// # Errors
-    /// Once the lease is gone, for example because the robot restarted.
-    pub fn send(&mut self, payload: impl Into<Bytes>) -> anyhow::Result<()> {
+    /// Once the lease is gone: [`Error::LeaseLost`], [`Error::RobotLeft`] or
+    /// [`Error::Disconnected`].
+    pub fn send(&mut self, payload: impl Into<Bytes>) -> Result<()> {
         while let Ok(event) = self.events.try_recv() {
             match event {
                 RoomEvent::ParticipantAttributesChanged {
@@ -389,17 +366,15 @@ impl Driver {
                         .get(HOLDER_ATTRIBUTE)
                         .is_some_and(|holder| *holder != me.0)
                     {
-                        anyhow::bail!("Lost the lease");
+                        return Err(Error::LeaseLost);
                     }
                 }
                 RoomEvent::ParticipantDisconnected(participant)
                     if participant.identity() == self.robot =>
                 {
-                    anyhow::bail!("The robot left the room");
+                    return Err(Error::RobotLeft);
                 }
-                RoomEvent::Disconnected { reason } => {
-                    anyhow::bail!("Disconnected from the room: {reason:?}");
-                }
+                RoomEvent::Disconnected { reason } => return Err(Error::Disconnected { reason }),
                 _ => {}
             }
         }

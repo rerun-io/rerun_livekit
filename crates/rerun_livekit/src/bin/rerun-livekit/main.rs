@@ -43,7 +43,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     if let Command::Robot(args) = &command {
-        robot::start_command_forwarding(args)?;
+        robot::start_command_forwarding(args).await?;
     }
 
     let run = async {

@@ -39,7 +39,8 @@ parking_lot = "0.12"
 prost = "0.14"
 rand = "0.9"
 serde = { version = "1", features = ["derive"] }
-tokio = { version = "1.53", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
+thiserror = "2"
+tokio = { version = "1.53", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-stream = "0.1"
 toml = "0.9"
 tonic = { version = "0.14", default-features = false, features = ["transport"] }

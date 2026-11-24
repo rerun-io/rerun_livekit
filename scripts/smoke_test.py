@@ -221,11 +221,11 @@ def check_late_join(rrd: Path) -> None:
     check(not late_temporal, f"a late joiner gets no old temporal data: {sorted(late_temporal)}")
 
 
-def start_driver(identity: str) -> tuple[int, int]:
+def start_driver(name: str) -> tuple[int, int]:
     """Starts `keyboard_teleop` in a pseudo-terminal, which it needs to read keys."""
     pid, terminal = pty.fork()
     if pid == 0:
-        os.execv(KEYBOARD_TELEOP, [str(KEYBOARD_TELEOP), "--identity", identity])
+        os.execv(KEYBOARD_TELEOP, [str(KEYBOARD_TELEOP), "--name", name])
     return pid, terminal
 
 
@@ -340,7 +340,7 @@ def run(processes: Processes, temp: Path) -> None:
     )
     time.sleep(3)
     late_operator = processes.start(
-        "late_operator", BRIDGE, "operator", "--identity", "late", "--viewer", proxy_url(LATE_OPERATOR_PORT)
+        "late_operator", BRIDGE, "operator", "--name", "late", "--viewer", proxy_url(LATE_OPERATOR_PORT)
     )
     time.sleep(6)
     processes.stop(late_operator)
