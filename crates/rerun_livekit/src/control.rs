@@ -101,6 +101,18 @@ impl Leases {
             next_id: u64::try_from(now.as_micros()).unwrap_or(u64::MAX),
         }
     }
+
+    /// Drops the lease if `holder` holds it. Returns whether it did.
+    fn drop_held_by(&mut self, holder: &ParticipantIdentity) -> bool {
+        let is_held = self
+            .current
+            .as_ref()
+            .is_some_and(|lease| lease.holder == *holder);
+        if is_held {
+            self.current = None;
+        }
+        is_held
+    }
 }
 
 /// Joins the room and returns the command the robot should follow right now.
@@ -159,6 +171,18 @@ async fn receive_session(
             event = events.recv() => match event {
                 Some(RoomEvent::DataTrackPublished(track)) if track.info().name() == COMMAND_TRACK => {
                     tokio::spawn(forward_commands(track, command_tx.clone()));
+                }
+                Some(RoomEvent::ParticipantDisconnected(participant)) => {
+                    let identity = participant.identity();
+                    // A participant that rejoined under the same identity is back already, and
+                    // the lease may be its own by now.
+                    let has_left = !room.remote_participants().contains_key(&identity);
+                    let had_lease = has_left
+                        && lease_tx.send_if_modified(|leases| leases.drop_held_by(&identity));
+                    if had_lease {
+                        current_tx.send_replace(None);
+                        log::info!("{identity} left and lost the lease");
+                    }
                 }
                 Some(RoomEvent::Disconnected { reason }) => break Err(Error::Disconnected { reason }),
                 Some(_) => {}
@@ -280,16 +304,7 @@ fn register_lease_methods(
             let (lease_tx, current_tx) = (lease_tx.clone(), current_tx.clone());
             Box::pin(async move {
                 let caller = invocation.caller_identity;
-                let was_holder = lease_tx.send_if_modified(|leases| {
-                    let was_holder = leases
-                        .current
-                        .as_ref()
-                        .is_some_and(|held| held.holder == caller);
-                    if was_holder {
-                        leases.current = None;
-                    }
-                    was_holder
-                });
+                let was_holder = lease_tx.send_if_modified(|leases| leases.drop_held_by(&caller));
                 if was_holder {
                     current_tx.send_replace(None);
                     log::info!("{caller} released the lease");
