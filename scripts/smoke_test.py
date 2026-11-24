@@ -221,11 +221,12 @@ def check_late_join(rrd: Path) -> None:
     check(not late_temporal, f"a late joiner gets no old temporal data: {sorted(late_temporal)}")
 
 
-def start_driver(name: str) -> tuple[int, int]:
+def start_driver(name: str | None = None) -> tuple[int, int]:
     """Starts `keyboard_teleop` in a pseudo-terminal, which it needs to read keys."""
     pid, terminal = pty.fork()
     if pid == 0:
-        os.execv(KEYBOARD_TELEOP, [str(KEYBOARD_TELEOP), "--name", name])
+        name_args = ["--name", name] if name else []
+        os.execv(KEYBOARD_TELEOP, [str(KEYBOARD_TELEOP), *name_args])
     return pid, terminal
 
 
@@ -260,14 +261,15 @@ def check_control() -> None:
     commands.bind(("127.0.0.1", COMMAND_PORT))
     commands.setblocking(False)
 
-    alice, alice_terminal = start_driver("alice")
+    # Without names, so that the two drivers only differ by the random name each gets.
+    alice, alice_terminal = start_driver()
     check("You are driving" in read_terminal(alice_terminal, 5), "the first driver gets the lease")
     os.write(alice_terminal, b"w")
     time.sleep(0.3)
     forward, _left, _turn = struct.unpack("<3f", newest_command(commands))
     check(forward > 0, "the driver's command arrives over UDP")
 
-    bob, bob_terminal = start_driver("bob")
+    bob, bob_terminal = start_driver()
     check("is driving" in read_terminal(bob_terminal, 5), "a second driver is refused while the first drives")
     os.waitpid(bob, 0)
 

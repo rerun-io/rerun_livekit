@@ -37,6 +37,18 @@ impl Role {
         }
     }
 
+    /// Whether a room has at most one participant with this role: the robot's roles.
+    ///
+    /// Their identity is the bare role, so that a robot that restarts replaces the participant
+    /// it left behind, and a second robot in the room pushes the first one out instead of
+    /// mixing in.
+    fn is_one_per_room(self) -> bool {
+        match self {
+            Self::Robot | Self::RobotControl => true,
+            Self::Operator | Self::Driver => false,
+        }
+    }
+
     /// The role `participant` announced, if it is one of ours.
     pub fn of(participant: &RemoteParticipant) -> Option<Self> {
         let attributes = participant.attributes();
@@ -66,14 +78,25 @@ pub struct RoomArgs {
     #[arg(long, env = "LIVEKIT_API_SECRET", default_value = "secret")]
     api_secret: String,
 
-    /// Room to join. Robot and operators must use the same one.
+    /// Room to join. One robot per room: the robot, its operators and its driver must use
+    /// the same one.
     #[arg(long, default_value = "rerun")]
     room: String,
 
-    /// A name for this machine or person, to tell two participants with the same role apart.
-    /// The identity in the room is the name, a dash, and the role, for example `alice-driver`.
+    /// A name for this machine or person. The identity in the room is the name, a dash, and
+    /// the role, for example `alice-driver`. Without it, operators and drivers get a random
+    /// name, and the robot joins as `robot`.
     #[arg(long)]
     name: Option<String>,
+
+    /// The name of an operator or a driver without `--name`. It stays the same for the life
+    /// of this value, so that reconnecting replaces the participant that was left behind.
+    #[arg(skip = random_name())]
+    random_name: String,
+}
+
+fn random_name() -> String {
+    format!("{:04x}", rand::random::<u16>())
 }
 
 impl RoomArgs {
@@ -90,6 +113,7 @@ impl RoomArgs {
             api_secret: api_secret.into(),
             room: room.into(),
             name: None,
+            random_name: random_name(),
         }
     }
 
@@ -103,8 +127,9 @@ impl RoomArgs {
 
     /// Joins the room as `role`, with a locally minted token.
     ///
-    /// The identity in the room is the role, or `<name>-<role>` with `--name`. One process can
-    /// join once per role, and two processes with the same role need different names.
+    /// The identity in the room is `<name>-<role>`. Without `--name`, operators and drivers use
+    /// a random name, so that any number of them can join, and the robot's roles use the bare
+    /// role, so that the room has one robot.
     ///
     /// # Errors
     /// If the token cannot be made or the room cannot be reached.
@@ -115,7 +140,13 @@ impl RoomArgs {
             api_secret,
             room,
             name,
+            random_name,
         } = self;
+        let name = match name {
+            Some(name) => Some(name),
+            None if role.is_one_per_room() => None,
+            None => Some(random_name),
+        };
         let identity = match name {
             Some(name) => format!("{name}-{}", role.as_str()),
             None => role.as_str().to_owned(),

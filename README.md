@@ -93,7 +93,8 @@ export LIVEKIT_URL=ws://<robot>:7880                               # on the oper
   A relayed one runs on TCP, which brings back the stalls that WebRTC avoids.
 
 Every command also takes `--url`, `--api-key`, `--api-secret` and `--room`.
-Two participants of the same kind, such as two operators, each need their own `--name`.
+A room holds one robot, and any number of operators.
+Give each robot its own room.
 For a web Viewer on the operator side, run `rerun --serve-web` there and pass its proxy address as `--viewer`.
 
 ## How data travels

@@ -297,7 +297,7 @@ pub struct Driver {
 }
 
 impl Driver {
-    /// Joins the room and takes the lease.
+    /// Joins the room and takes the lease from its robot. A room has one robot.
     ///
     /// # Errors
     /// [`Error::LeaseHeld`] if another driver holds the lease, or another [`Error`] if the
