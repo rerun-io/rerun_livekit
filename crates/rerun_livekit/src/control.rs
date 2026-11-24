@@ -41,7 +41,7 @@ const RELEASE_METHOD: &str = "teleop.release";
 const LEASE_ATTRIBUTE: &str = "teleop.lease";
 
 /// RPC error code for "another driver holds the lease", with the holder as its data.
-/// LiveKit reserves 1000 and up.
+/// LiveKit reserves 1001 to 1999.
 const LEASE_HELD_ERROR: u32 = 1;
 
 /// How long the robot waits before it starts a new session after losing the room.
