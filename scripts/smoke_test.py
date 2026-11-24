@@ -273,12 +273,17 @@ def check_control() -> None:
     check("is driving" in read_terminal(bob_terminal, 5), "a second driver is refused while the first drives")
     os.waitpid(bob, 0)
 
-    os.kill(alice, signal.SIGKILL)
-    os.waitpid(alice, 0)
+    # A driver whose link stalls: its commands stop, so the robot stops and lets another take over.
+    os.kill(alice, signal.SIGSTOP)
     time.sleep(1)
-    check(newest_command(commands) == b"", "an empty datagram says stop after the driver dies")
+    check(newest_command(commands) == b"", "an empty datagram says stop when the driver goes quiet")
     carol, carol_terminal = start_driver("carol")
-    check("You are driving" in read_terminal(carol_terminal, 5), "another driver takes over after the first one dies")
+    check("You are driving" in read_terminal(carol_terminal, 5), "another driver takes over from a quiet one")
+
+    os.kill(alice, signal.SIGCONT)
+    check("Lost the lease" in read_terminal(alice_terminal, 5), "the quiet driver learns it lost the lease")
+    os.waitpid(alice, 0)
+
     os.write(carol_terminal, b"q")
     os.waitpid(carol, 0)
 

@@ -158,7 +158,7 @@ impl RoomArgs {
             .with_grants(VideoGrants {
                 room_join: true,
                 room: room.clone(),
-                // The robot announces who holds the control lease in its attributes.
+                // The robot announces the current control lease in its attributes.
                 can_update_own_metadata: Some(role == Role::RobotControl),
                 ..Default::default()
             })
