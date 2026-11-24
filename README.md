@@ -215,6 +215,15 @@ It follows LiveKit's [teleoperation pattern](https://docs.livekit.io/robotics/te
 - The robot stops when commands stop arriving.
   From then on another driver may take the lease.
 
+Both ends join the room with a `RoomArgs`.
+A program with its own command line can `#[command(flatten)]` it, as [`keyboard_teleop`](crates/rerun_livekit/examples/keyboard_teleop.rs) does, which gives it `--url`, `--room` and the rest.
+Other code builds one:
+
+```rust
+let room_args = rerun_livekit::RoomArgs::new("wss://<project>.livekit.cloud", api_key, api_secret, "rerun")
+    .with_name("alice");
+```
+
 On the operator's side:
 
 ```rust

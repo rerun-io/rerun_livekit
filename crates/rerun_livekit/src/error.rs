@@ -1,10 +1,8 @@
-//! What can go wrong when joining the room or driving the robot.
-
 use livekit::DisconnectReason;
 use livekit::prelude::{PublishError, RoomError, RpcError};
 use livekit_api::access_token::AccessTokenError;
 
-/// An error of this crate.
+/// What can go wrong when joining the room or driving the robot.
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     #[error("Failed to create the LiveKit access token")]

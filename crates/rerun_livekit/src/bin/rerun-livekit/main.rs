@@ -4,6 +4,7 @@
 //! [`operator`] receives it from the room and writes it to a Viewer next to the operator.
 
 mod classify;
+mod commands_to_udp;
 mod latency;
 mod logging;
 mod operator;
@@ -43,8 +44,10 @@ async fn main() -> anyhow::Result<()> {
             .map_err(|err| anyhow::anyhow!("Failed to turn off the playout delay: {err}"))?;
     }
 
-    if let Command::Robot(args) = &command {
-        robot::start_command_forwarding(args).await?;
+    if let Command::Robot(args) = &command
+        && let Some(to) = args.commands_to_udp
+    {
+        commands_to_udp::start(args.room.clone(), to).await?;
     }
 
     let run = async {
