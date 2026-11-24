@@ -95,6 +95,7 @@ export LIVEKIT_URL=ws://<robot>:7880                               # on the oper
 Every command also takes `--url`, `--api-key`, `--api-secret` and `--room`.
 A room holds one robot, and any number of operators.
 Give each robot its own room, and no `--name`: then a second robot in the same room pushes the first one out instead of mixing in.
+The robot that was pushed out exits with an error. Don't have a supervisor restart it on that error, or the two robots take turns pushing each other out.
 For a web Viewer on the operator side, run `rerun --serve-web` there and pass its proxy address as `--viewer`.
 
 ## How data travels
@@ -221,13 +222,13 @@ A program with its own command line can `#[command(flatten)]` it, as [`keyboard_
 Other code builds one:
 
 ```rust
-let room_args = rerun_livekit::RoomArgs::new("wss://<project>.livekit.cloud", api_key, api_secret, "rerun")
-    .with_name("alice");
+let room_args = rerun_livekit::RoomArgs::new("wss://<project>.livekit.cloud", api_key, api_secret, "rerun");
 ```
 
-On the operator's side:
+On the operator's side, optionally with a name that shows who is driving:
 
 ```rust
+let room_args = room_args.with_name("alice");
 let mut driver = rerun_livekit::control::Driver::acquire(&room_args).await?;
 loop {
     driver.send(my_command.to_bytes())?; // at a fixed rate, for example 30 Hz

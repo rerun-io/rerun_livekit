@@ -82,7 +82,9 @@ def main() -> None:
 
     dataset = rr.catalog.CatalogClient(args.catalog).create_dataset(args.dataset, exist_ok=True)
 
-    # Built before any segment is registered, so that a failure registers nothing.
+    # Everything is written before anything is registered, so that a failure registers nothing.
+    layer_rrd = args.operator_rrd.with_suffix(".layer.rrd")
+    write_operator_layer(args.operator_rrd, layer_rrd, args.operator_prefix, episode)
     blueprint_rbl = None
     if dataset.default_blueprint() is None:
         download_model()
@@ -90,9 +92,6 @@ def main() -> None:
         blueprint(args.operator_prefix).save(args.dataset, blueprint_rbl)
 
     dataset.register(args.robot_rrd.resolve().as_uri(), layer_name="robot").wait()
-
-    layer_rrd = args.operator_rrd.with_suffix(".layer.rrd")
-    write_operator_layer(args.operator_rrd, layer_rrd, args.operator_prefix, episode)
     dataset.register(layer_rrd.resolve().as_uri(), layer_name="operator").wait()
 
     if blueprint_rbl is not None:

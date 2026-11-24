@@ -244,17 +244,22 @@ def read_terminal(terminal: int, secs: float) -> str:
     return output.decode(errors="replace")
 
 
-def newest_command(commands: socket.socket) -> bytes:
-    """The last datagram that `--commands-to-udp` sent."""
-    newest = None
+def datagrams_since_last_read(commands: socket.socket) -> list[bytes]:
+    """The datagrams that `--commands-to-udp` sent since the previous read, oldest first."""
+    datagrams = []
     while True:
         try:
-            newest = commands.recv(64)
+            datagrams.append(commands.recv(64))
         except BlockingIOError:
-            break
-    if newest is None:
+            return datagrams
+
+
+def newest_command(commands: socket.socket) -> bytes:
+    """The last datagram that `--commands-to-udp` sent."""
+    datagrams = datagrams_since_last_read(commands)
+    if not datagrams:
         sys.exit("FAILED: no command arrived over UDP")
-    return newest
+    return datagrams[-1]
 
 
 def check_control() -> None:
@@ -285,11 +290,13 @@ def check_control() -> None:
     check("Lost the lease" in read_terminal(alice_terminal, 5), "the quiet driver learns it lost the lease")
     os.waitpid(alice, 0)
 
+    # Timed from the key press: the robot's 300 ms watchdog would only stop it later.
+    quit_at = time.monotonic()
     os.write(carol_terminal, b"q")
+    while b"" not in datagrams_since_last_read(commands) and time.monotonic() - quit_at < 1.0:
+        time.sleep(0.01)
+    check(time.monotonic() - quit_at < 0.25, "a driver that quits stops the robot at once")
     os.waitpid(carol, 0)
-    # Well within the robot's 300 ms watchdog, so it is the release that stopped it.
-    time.sleep(0.2)
-    check(newest_command(commands) == b"", "a driver that quits stops the robot at once")
 
 
 def main() -> None:
