@@ -129,12 +129,18 @@ async fn receive_session(
                     tokio::spawn(forward_commands(track, command_tx.clone()));
                 }
                 Some(RoomEvent::ParticipantDisconnected(participant)) => {
-                    let mut lease = lease.lock();
-                    if lease.as_ref().is_some_and(|lease| lease.holder == participant.identity()) {
-                        *lease = None;
-                        drop(lease);
+                    let was_holder = {
+                        let mut lease = lease.lock();
+                        let was_holder = lease.as_ref().is_some_and(|lease| lease.holder == participant.identity());
+                        if was_holder {
+                            *lease = None;
+                        }
+                        was_holder
+                    };
+                    if was_holder {
                         log::info!("{} left and lost the lease", participant.identity());
                         current_tx.send_replace(None);
+                        announce_holder(&local, "").await;
                     }
                 }
                 Some(RoomEvent::Disconnected { reason }) => break Err(Error::Disconnected { reason }),
@@ -177,30 +183,25 @@ fn accept(
     Some(command.payload.clone())
 }
 
+/// Tells everyone in the room who holds the lease. An empty `holder` means nobody does.
+async fn announce_holder(local: &LocalParticipant, holder: &str) {
+    // An empty value removes the attribute.
+    let attributes = HashMap::from([(HOLDER_ATTRIBUTE.to_owned(), holder.to_owned())]);
+    if let Err(err) = local.set_attributes(attributes).await {
+        log::warn!("Failed to announce the lease holder: {err}");
+    }
+}
+
 fn register_lease_methods(
     local: &LocalParticipant,
     lease: &Arc<Mutex<Option<Lease>>>,
     watchdog_timeout: Duration,
     current_tx: &watch::Sender<Option<Bytes>>,
 ) {
-    let announce_holder = {
-        let local = local.clone();
-        move |holder: String| {
-            let local = local.clone();
-            async move {
-                // An empty value removes the attribute.
-                let attributes = HashMap::from([(HOLDER_ATTRIBUTE.to_owned(), holder)]);
-                if let Err(err) = local.set_attributes(attributes).await {
-                    log::warn!("Failed to announce the lease holder: {err}");
-                }
-            }
-        }
-    };
-
     local.register_rpc_method(ACQUIRE_METHOD.to_owned(), {
-        let (lease, announce_holder) = (Arc::clone(lease), announce_holder.clone());
+        let (lease, local) = (Arc::clone(lease), local.clone());
         move |invocation| {
-            let (lease, announce_holder) = (Arc::clone(&lease), announce_holder.clone());
+            let (lease, local) = (Arc::clone(&lease), local.clone());
             Box::pin(async move {
                 let caller = invocation.caller_identity;
                 let id = {
@@ -223,20 +224,18 @@ fn register_lease_methods(
                     id
                 };
                 log::info!("{caller} got the lease");
-                announce_holder(caller.to_string()).await;
+                // Before answering, so that the driver hears of its lease before any later holder.
+                announce_holder(&local, &caller.0).await;
                 Ok(id.to_string())
             })
         }
     });
 
     local.register_rpc_method(RELEASE_METHOD.to_owned(), {
-        let (lease, current_tx) = (Arc::clone(lease), current_tx.clone());
+        let (lease, local, current_tx) = (Arc::clone(lease), local.clone(), current_tx.clone());
         move |invocation| {
-            let (lease, announce_holder, current_tx) = (
-                Arc::clone(&lease),
-                announce_holder.clone(),
-                current_tx.clone(),
-            );
+            let (lease, local, current_tx) =
+                (Arc::clone(&lease), local.clone(), current_tx.clone());
             Box::pin(async move {
                 let caller = invocation.caller_identity;
                 let was_holder = {
@@ -250,7 +249,7 @@ fn register_lease_methods(
                 if was_holder {
                     current_tx.send_replace(None);
                     log::info!("{caller} released the lease");
-                    announce_holder(String::new()).await;
+                    announce_holder(&local, "").await;
                 }
                 Ok(String::new())
             })
@@ -294,6 +293,7 @@ pub struct Driver {
     track: LocalDataTrack,
     lease: u64,
     seq: u64,
+    lease_watch: LeaseWatch,
 }
 
 impl Driver {
@@ -342,6 +342,7 @@ impl Driver {
             .await
             .map_err(|source| Error::PublishCommandTrack { source })?;
 
+        let lease_watch = LeaseWatch::new(room.local_participant().identity());
         Ok(Self {
             room,
             events,
@@ -349,6 +350,7 @@ impl Driver {
             track,
             lease,
             seq: 0,
+            lease_watch,
         })
     }
 
@@ -368,12 +370,8 @@ impl Driver {
                     participant,
                     changed_attributes,
                 } if participant.identity() == self.robot => {
-                    let me = self.room.local_participant().identity();
-                    if changed_attributes
-                        .get(HOLDER_ATTRIBUTE)
-                        .is_some_and(|holder| *holder != me.0)
-                    {
-                        return Err(Error::LeaseLost);
+                    if let Some(holder) = changed_attributes.get(HOLDER_ATTRIBUTE) {
+                        self.lease_watch.on_holder(holder)?;
                     }
                 }
                 RoomEvent::ParticipantDisconnected(participant)
@@ -406,6 +404,37 @@ impl Driver {
             log::warn!("Failed to release the lease: {}", err.message);
         }
         self.room.close().await.ok();
+    }
+}
+
+/// Whether a driver still holds its lease, going by who the robot announces as the holder.
+///
+/// Announcements made before the robot announced this driver are stale: they come from before
+/// the acquire, such as the previous driver's release. Only a later announcement of another
+/// holder, or of nobody, means that the lease is gone.
+struct LeaseWatch {
+    me: ParticipantIdentity,
+    has_been_announced: bool,
+}
+
+impl LeaseWatch {
+    fn new(me: ParticipantIdentity) -> Self {
+        Self {
+            me,
+            has_been_announced: false,
+        }
+    }
+
+    /// Takes in a holder the robot announced. An empty `holder` means nobody.
+    fn on_holder(&mut self, holder: &str) -> Result<()> {
+        if holder == self.me.0 {
+            self.has_been_announced = true;
+            Ok(())
+        } else if self.has_been_announced {
+            Err(Error::LeaseLost)
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -461,5 +490,22 @@ mod tests {
             "an old lease"
         );
         assert_eq!(accept(&mut lease, &alice, &command(1, 6)), payload);
+    }
+
+    #[test]
+    fn only_a_later_announcement_takes_the_lease() {
+        let holds_after = |announcements: &[&str]| {
+            let mut watch = LeaseWatch::new(ParticipantIdentity("carol".to_owned()));
+            announcements
+                .iter()
+                .try_for_each(|holder| watch.on_holder(holder))
+                .is_ok()
+        };
+
+        assert!(holds_after(&["", "carol"]), "the previous driver's release");
+        assert!(holds_after(&["alice", "carol"]), "the previous holder");
+        assert!(holds_after(&["carol", "carol"]), "announced again");
+        assert!(!holds_after(&["carol", "dave"]), "another driver took over");
+        assert!(!holds_after(&["carol", ""]), "the robot dropped the lease");
     }
 }
