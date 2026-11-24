@@ -7,8 +7,8 @@ only the operator's end knows: the camera images that reached it, and the latenc
 `rerun-livekit operator --plot-latency`. The images move below `--operator-prefix`, so that they
 sit next to the robot's instead of taking their place.
 
-It is for episodes of `mujoco_robot.py`: it reuses that script's 3D view, which reads the Go2 model
-that `mujoco_robot.py` downloads.
+It is for episodes of `mujoco_robot.py`: it reuses that script's 3D view, which reads the Go2 model.
+It downloads the model if this machine does not have it yet.
 
 Run it with `pixi run register-episode robot.rrd operator.rrd`, while `rerun server` is running.
 """
@@ -21,7 +21,7 @@ from pathlib import Path
 
 import rerun as rr
 import rerun.blueprint as rrb
-from mujoco_robot import SCENE_XML, robot_view
+from mujoco_robot import SCENE_XML, download_go2, robot_view
 from rerun.chunk import LazyChunkStream, RrdReader
 from rerun.mjcf import MjcfTree
 
@@ -81,15 +81,21 @@ def main() -> None:
         sys.exit(f"{args.operator_rrd} is not a recording of episode {episode!r}")
 
     dataset = rr.catalog.CatalogClient(args.catalog).create_dataset(args.dataset, exist_ok=True)
+
+    # Built before anything is registered, so that a failure leaves the dataset as it was.
+    blueprint_rbl = None
+    if dataset.default_blueprint() is None:
+        download_go2()
+        blueprint_rbl = args.operator_rrd.with_suffix(".rbl")
+        blueprint(args.operator_prefix).save(args.dataset, blueprint_rbl)
+
     dataset.register(args.robot_rrd.resolve().as_uri(), layer_name="robot").wait()
 
     layer_rrd = args.operator_rrd.with_suffix(".layer.rrd")
     write_operator_layer(args.operator_rrd, layer_rrd, args.operator_prefix, episode)
     dataset.register(layer_rrd.resolve().as_uri(), layer_name="operator").wait()
 
-    if dataset.default_blueprint() is None:
-        blueprint_rbl = args.operator_rrd.with_suffix(".rbl")
-        blueprint(args.operator_prefix).save(args.dataset, blueprint_rbl)
+    if blueprint_rbl is not None:
         dataset.register_blueprint(blueprint_rbl.resolve().as_uri(), name="both ends")
 
     print(f"Registered {episode} in {args.dataset}: {dataset.segment_url(episode)}")
