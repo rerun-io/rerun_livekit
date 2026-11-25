@@ -4,8 +4,8 @@ use std::convert::Infallible;
 
 use anyhow::Context as _;
 use futures_util::StreamExt as _;
-use livekit::StreamReader as _;
 use livekit::prelude::*;
+use livekit::{StreamError, StreamReader as _};
 use prost::Message as _;
 use re_protos::log_msg::v1alpha1::log_msg::Msg;
 use re_protos::log_msg::v1alpha1::{ArrowMsg, LogMsg};
@@ -57,7 +57,7 @@ pub struct OperatorArgs {
 /// Always, with what ended the session.
 pub async fn run_session(args: &OperatorArgs) -> anyhow::Result<Infallible> {
     let mut viewer = crate::proxy::connect(&args.viewer).await?;
-    let (room, events) = args.room.connect(Role::Operator).await?;
+    let (room, mut events) = args.room.connect(Role::Operator).await?;
     log::info!("Forwarding the room to {}", args.viewer);
 
     let latency_plots = if args.plot_latency {
@@ -67,18 +67,19 @@ pub async fn run_session(args: &OperatorArgs) -> anyhow::Result<Infallible> {
     };
     let (viewer_tx, viewer_rx) = mpsc::channel(VIEWER_QUEUE_CAPACITY);
     let result = tokio::select! {
-        result = handle_room_events(events, viewer_tx, latency_plots) => result,
+        result = handle_room_events(&mut events, viewer_tx, latency_plots) => result,
         result = viewer.write_messages(ReceiverStream::new(viewer_rx)) => match result {
             Ok(_) => Err(anyhow::anyhow!("The viewer closed the stream")),
             Err(status) => Err(status).context("Lost the viewer"),
         },
-    };
+    }
+    .map_err(|err| crate::session_error(err, &mut events));
     room.close().await.ok();
     result
 }
 
 async fn handle_room_events(
-    mut events: mpsc::UnboundedReceiver<RoomEvent>,
+    events: &mut mpsc::UnboundedReceiver<RoomEvent>,
     viewer_tx: mpsc::Sender<WriteMessagesRequest>,
     latency_plots: LatencyPlots,
 ) -> anyhow::Result<Infallible> {
@@ -92,10 +93,18 @@ async fn handle_room_events(
                     continue;
                 };
                 // Read to the end before taking the next event, so messages stay in order.
-                let bytes = reader
-                    .read_all()
-                    .await
-                    .context("Failed to receive a message from the room")?;
+                let bytes = match reader.read_all().await {
+                    Ok(bytes) => bytes,
+                    // The robot or this operator lost the room. When the robot sees this
+                    // operator again, it replays what a newcomer needs.
+                    Err(StreamError::AbnormalEnd(reason)) => {
+                        log::warn!("A message from the room was cut off: {reason}");
+                        continue;
+                    }
+                    Err(err) => {
+                        return Err(err).context("Failed to receive a message from the room");
+                    }
+                };
                 if topic == TRACK_INFO_TOPIC {
                     track_infos.insert(bytes)?;
                     continue;
@@ -140,7 +149,7 @@ async fn handle_room_events(
                 tokio::spawn(receive_latest(frames, viewer_tx.clone(), latency));
             }
             RoomEvent::Disconnected { reason } => {
-                anyhow::bail!("Disconnected from the room: {reason:?}");
+                return Err(rerun_livekit::Error::Disconnected { reason }.into());
             }
             _ => {}
         }

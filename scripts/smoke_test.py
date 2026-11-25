@@ -84,10 +84,12 @@ class Processes:
         return process
 
     def stop(self, process: subprocess.Popen[bytes]) -> None:
-        """Interrupts `process`, and kills it if that is not enough."""
-        os.killpg(process.pid, signal.SIGINT)
+        """Interrupts `process` and its group, and kills them if that is not enough."""
         try:
+            os.killpg(process.pid, signal.SIGINT)
             process.wait(timeout=5)
+        except ProcessLookupError:
+            pass  # The whole group already exited.
         except subprocess.TimeoutExpired:
             os.killpg(process.pid, signal.SIGKILL)
         self.running.remove(process)
@@ -221,11 +223,12 @@ def check_late_join(rrd: Path) -> None:
     check(not late_temporal, f"a late joiner gets no old temporal data: {sorted(late_temporal)}")
 
 
-def start_driver(name: str) -> tuple[int, int]:
+def start_driver(name: str | None = None) -> tuple[int, int]:
     """Starts `keyboard_teleop` in a pseudo-terminal, which it needs to read keys."""
     pid, terminal = pty.fork()
     if pid == 0:
-        os.execv(KEYBOARD_TELEOP, [str(KEYBOARD_TELEOP), "--name", name])
+        name_args = ["--name", name] if name else []
+        os.execv(KEYBOARD_TELEOP, [str(KEYBOARD_TELEOP), *name_args])
     return pid, terminal
 
 
@@ -242,17 +245,22 @@ def read_terminal(terminal: int, secs: float) -> str:
     return output.decode(errors="replace")
 
 
-def newest_command(commands: socket.socket) -> bytes:
-    """The last datagram that `--commands-to-udp` sent."""
-    newest = None
+def datagrams_since_last_read(commands: socket.socket) -> list[bytes]:
+    """The datagrams that `--commands-to-udp` sent since the previous read, oldest first."""
+    datagrams = []
     while True:
         try:
-            newest = commands.recv(64)
+            datagrams.append(commands.recv(64))
         except BlockingIOError:
-            break
-    if newest is None:
+            return datagrams
+
+
+def newest_command(commands: socket.socket) -> bytes:
+    """The last datagram that `--commands-to-udp` sent."""
+    datagrams = datagrams_since_last_read(commands)
+    if not datagrams:
         sys.exit("FAILED: no command arrived over UDP")
-    return newest
+    return datagrams[-1]
 
 
 def check_control() -> None:
@@ -260,24 +268,36 @@ def check_control() -> None:
     commands.bind(("127.0.0.1", COMMAND_PORT))
     commands.setblocking(False)
 
-    alice, alice_terminal = start_driver("alice")
+    # Without names, so that the two drivers only differ by the random name each gets.
+    alice, alice_terminal = start_driver()
     check("You are driving" in read_terminal(alice_terminal, 5), "the first driver gets the lease")
     os.write(alice_terminal, b"w")
     time.sleep(0.3)
     forward, _left, _turn = struct.unpack("<3f", newest_command(commands))
     check(forward > 0, "the driver's command arrives over UDP")
 
-    bob, bob_terminal = start_driver("bob")
+    bob, bob_terminal = start_driver()
     check("is driving" in read_terminal(bob_terminal, 5), "a second driver is refused while the first drives")
     os.waitpid(bob, 0)
 
-    os.kill(alice, signal.SIGKILL)
-    os.waitpid(alice, 0)
+    # A driver whose link stalls: its commands stop, so the robot stops and lets another take over.
+    os.kill(alice, signal.SIGSTOP)
     time.sleep(1)
-    check(newest_command(commands) == b"", "an empty datagram says stop after the driver dies")
+    check(newest_command(commands) == b"", "an empty datagram says stop when the driver goes quiet")
     carol, carol_terminal = start_driver("carol")
-    check("You are driving" in read_terminal(carol_terminal, 5), "another driver takes over after the first one dies")
+    check("You are driving" in read_terminal(carol_terminal, 5), "another driver takes over from a quiet one")
+
+    os.kill(alice, signal.SIGCONT)
+    check("Lost the lease" in read_terminal(alice_terminal, 5), "the quiet driver learns it lost the lease")
+    os.waitpid(alice, 0)
+
+    # Timed from the key press: the robot's 300 ms watchdog would only stop it later.
+    datagrams_since_last_read(commands)  # Older datagrams say stop too.
+    quit_at = time.monotonic()
     os.write(carol_terminal, b"q")
+    while b"" not in datagrams_since_last_read(commands) and time.monotonic() - quit_at < 1.0:
+        time.sleep(0.01)
+    check(time.monotonic() - quit_at < 0.25, "a driver that quits stops the robot at once")
     os.waitpid(carol, 0)
 
 
@@ -311,7 +331,7 @@ def run(processes: Processes, temp: Path) -> None:
     rules = temp / "rules.toml"
     rules.write_text(RULES)
     # Above the app's 20 Hz: LiveKit's default for images this small is 15 frames per second.
-    processes.start(
+    robot = processes.start(
         "robot",
         BRIDGE,
         "robot",
@@ -349,6 +369,16 @@ def run(processes: Processes, temp: Path) -> None:
 
     print("Control")
     check_control()
+
+    print("One robot per room")
+    processes.start("second_robot", BRIDGE, "robot", "--proxy", proxy_url(ROBOT_PROXY_PORT))
+    try:
+        exit_code = robot.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        exit_code = None
+    check(exit_code not in (None, 0), "a second robot in the room makes the first one stop")
+    log = (temp / "robot.log").read_text(errors="replace")
+    check("Another participant joined the room" in log, "the first robot says why it stopped")
 
 
 if __name__ == "__main__":

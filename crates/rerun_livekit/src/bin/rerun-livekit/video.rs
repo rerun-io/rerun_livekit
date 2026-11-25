@@ -13,8 +13,7 @@ use futures_util::StreamExt as _;
 use image::ImageEncoder as _;
 use itertools::izip;
 use livekit::options::{
-    FrameMetadataFeatures, TrackPublishOptions, VideoCodec, VideoEncoding,
-    compute_appropriate_encoding,
+    FrameMetadataFeatures, VideoCodec, VideoEncoding, compute_appropriate_encoding,
 };
 use livekit::prelude::*;
 use livekit::webrtc::native::yuv_helper;
@@ -498,7 +497,10 @@ pub struct VideoPublisher {
 struct PublishedTrack {
     info: TrackInfo,
     source: NativeVideoSource,
-    publication: LocalTrackPublication,
+
+    /// After a full reconnect, LiveKit publishes the track again under a new sid. It updates
+    /// the sid of the track, but not that of the publication it returned before.
+    track: LocalVideoTrack,
     last_frame: Instant,
 }
 
@@ -615,9 +617,8 @@ impl VideoPublisher {
             frame_metadata_features,
             ..Default::default()
         };
-        let publication = self
-            .local
-            .publish_track(LocalTrack::Video(track), options)
+        self.local
+            .publish_track(LocalTrack::Video(track.clone()), options)
             .await
             .with_context(|| format!("Failed to publish a video track for {stream}"))?;
         log::info!(
@@ -630,7 +631,7 @@ impl VideoPublisher {
         let track = PublishedTrack {
             info,
             source,
-            publication,
+            track,
             last_frame: Instant::now(),
         };
         Ok(self
@@ -662,7 +663,7 @@ impl VideoPublisher {
 
     async fn unpublish(&self, track: PublishedTrack) -> anyhow::Result<()> {
         self.local
-            .unpublish_track(&track.publication.sid())
+            .unpublish_track(&track.track.sid())
             .await
             .context("Failed to unpublish a video track")?;
         Ok(())

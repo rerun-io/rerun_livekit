@@ -21,8 +21,8 @@ re_protos = "=0.43.2"
 rerun = { version = "=0.43.2", default-features = false, features = ["sdk"] }
 
 # LiveKit
-livekit = { version = "0.11.0", features = ["rustls-tls-native-roots"] }
-livekit-api = { version = "0.10.2", default-features = false, features = ["access-token"] }
+livekit = { version = "0.12.1", features = ["rustls-tls-native-roots"] }
+livekit-token = "0.5.0"
 
 # External
 ahash = "0.8"

@@ -30,7 +30,9 @@ use crate::wire::{LATEST_TRACK, LOG_TOPIC, LatestFrame};
 /// The largest message the latest lane can carry.
 ///
 /// LiveKit's receiver gives up on a data track frame after 128 packets of at most 16 kB
-/// (the depacketizer and packetizer of `livekit-datatrack` 0.2.5).
+/// (the depacketizer and packetizer of `livekit-datatrack` 0.3.0). An operator whose link is
+/// slower than the robot's gets less: the server drops a frame that would wait more than
+/// 100 ms for it (`rtc.datachannel_data_track_target_latency` in its config).
 const MAX_LATEST_BYTES: usize = 1_900_000;
 
 /// The most messages to route before looking at anything else, so that an app that never
@@ -96,8 +98,10 @@ pub async fn run_session(args: &RobotArgs) -> anyhow::Result<Infallible> {
         Some(path) => Rules::load(path, default_video)?,
         None => Rules::new(default_video),
     };
-    let (room, events) = args.room.connect(Role::Robot).await?;
-    let result = forward(args, &rules, &room, events).await;
+    let (room, mut events) = args.room.connect(Role::Robot).await?;
+    let result = forward(args, &rules, &room, &mut events)
+        .await
+        .map_err(|err| crate::session_error(err, &mut events));
     room.close().await.ok();
     result
 }
@@ -106,7 +110,7 @@ async fn forward(
     args: &RobotArgs,
     rules: &Rules,
     room: &Room,
-    mut events: mpsc::UnboundedReceiver<RoomEvent>,
+    events: &mut mpsc::UnboundedReceiver<RoomEvent>,
 ) -> anyhow::Result<Infallible> {
     let mut log_msgs = crate::proxy::connect(&args.proxy)
         .await?
@@ -170,7 +174,7 @@ async fn forward(
                         next = log_msgs.message().now_or_never();
                     }
                 }
-                router.latest.flush();
+                router.latest.flush()?;
             }
 
             event = events.recv() => match event.context("The room closed")? {
@@ -183,14 +187,13 @@ async fn forward(
                     router.remove_operator(&participant.identity());
                 }
                 RoomEvent::Disconnected { reason } => {
-                    anyhow::bail!("Disconnected from the room: {reason:?}");
+                    return Err(rerun_livekit::Error::Disconnected { reason }.into());
                 }
                 _ => {}
             },
 
             _ = report.tick() => {
                 router.gate.report_and_reset();
-                router.latest.report_and_reset();
                 router.video.unpublish_idle().await?;
             }
 
@@ -298,7 +301,7 @@ impl Router<'_> {
         match delivery {
             Delivery::Guaranteed => self.queue_guaranteed(Retention::None, LOG_TOPIC, bytes),
             Delivery::Latched => self.queue_guaranteed(Retention::Static, LOG_TOPIC, bytes),
-            Delivery::Latest => self.latest.send(&stream, bytes),
+            Delivery::Latest => self.latest.send(&stream, bytes)?,
         }
         Ok(())
     }
@@ -456,7 +459,6 @@ struct LatestLane {
     /// Messages waiting to go out as one frame.
     pending: LatestFrame,
     pending_bytes: usize,
-    num_queue_full: u64,
 }
 
 impl LatestLane {
@@ -465,43 +467,44 @@ impl LatestLane {
             track,
             pending: LatestFrame::default(),
             pending_bytes: 0,
-            num_queue_full: 0,
         }
     }
 
     /// Adds a message to the frame that the next [`Self::flush`] sends.
-    fn send(&mut self, stream: &StreamKey, bytes: Bytes) {
+    fn send(&mut self, stream: &StreamKey, bytes: Bytes) -> anyhow::Result<()> {
         if MAX_LATEST_BYTES < bytes.len() {
             log::warn!(
                 "Dropping a {} byte message of {stream}: too large for the lossy lane. \
                  Reduce it at the source, or give it `delivery = \"guaranteed\"` in the rules",
                 bytes.len()
             );
-            return;
+            return Ok(());
         }
         if MAX_LATEST_BYTES < self.pending_bytes + bytes.len() {
-            self.flush();
+            self.flush()?;
         }
         self.pending_bytes += bytes.len();
         self.pending.log_msgs.push(bytes);
+        Ok(())
     }
 
     /// Sends what [`Self::send`] collected, as one frame.
-    fn flush(&mut self) {
+    fn flush(&mut self) -> anyhow::Result<()> {
         if self.pending.log_msgs.is_empty() {
-            return;
+            return Ok(());
         }
         let frame = std::mem::take(&mut self.pending).encode_to_vec();
         self.pending_bytes = 0;
-        if self.track.try_push(DataTrackFrame::new(frame)).is_err() {
-            self.num_queue_full += 1;
-        }
-    }
-
-    fn report_and_reset(&mut self) {
-        let num_queue_full = std::mem::take(&mut self.num_queue_full);
-        if 0 < num_queue_full {
-            log::info!("Latest-wins frames dropped because the link was busy: {num_queue_full}");
+        match self.track.try_push(DataTrackFrame::new(frame)) {
+            Ok(()) => Ok(()),
+            Err(err) => match err.reason() {
+                // The track is being published again after a reconnect, or LiveKit's pipeline
+                // fell behind. The next frame replaces this one either way.
+                PushFrameErrorReason::QueueFull => Ok(()),
+                PushFrameErrorReason::TrackUnpublished => {
+                    anyhow::bail!("The latest-wins data track was unpublished")
+                }
+            },
         }
     }
 }

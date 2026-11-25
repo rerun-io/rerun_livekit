@@ -34,7 +34,7 @@ rerun.workspace = true
 
 # LiveKit
 livekit.workspace = true
-livekit-api.workspace = true
+livekit-token.workspace = true
 
 # External
 ahash.workspace = true

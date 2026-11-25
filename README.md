@@ -93,7 +93,10 @@ export LIVEKIT_URL=ws://<robot>:7880                               # on the oper
   A relayed one runs on TCP, which brings back the stalls that WebRTC avoids.
 
 Every command also takes `--url`, `--api-key`, `--api-secret` and `--room`.
-Two participants of the same kind, such as two operators, each need their own `--name`.
+Each one makes its own access token from the key and secret, which let anyone join any room of the LiveKit project as anyone, so give them only to machines you would trust to drive the robot.
+A room holds one robot, and any number of operators.
+Give each robot its own room, and no `--name`: then a second robot in the same room pushes the first one out instead of mixing in.
+The robot that was pushed out exits with an error. Don't have a supervisor restart it on that error, or the two robots take turns pushing each other out.
 For a web Viewer on the operator side, run `rerun --serve-web` there and pass its proxy address as `--viewer`.
 
 ## How data travels
@@ -212,7 +215,7 @@ It follows LiveKit's [teleoperation pattern](https://docs.livekit.io/robotics/te
   A lost command is replaced by the next one and never retried late.
 - The robot hands out a lease.
   Only the lease holder's commands count, and a second driver is refused.
-- The robot stops when commands stop arriving.
+- The robot stops when commands stop arriving, or arrive late.
   From then on another driver may take the lease.
 
 Both ends join the room with a `RoomArgs`.
@@ -220,13 +223,13 @@ A program with its own command line can `#[command(flatten)]` it, as [`keyboard_
 Other code builds one:
 
 ```rust
-let room_args = rerun_livekit::RoomArgs::new("wss://<project>.livekit.cloud", api_key, api_secret, "rerun")
-    .with_name("alice");
+let room_args = rerun_livekit::RoomArgs::new("wss://<project>.livekit.cloud", api_key, api_secret, "rerun");
 ```
 
-On the operator's side:
+On the operator's side, optionally with a name that shows who is driving:
 
 ```rust
+let room_args = room_args.with_name("alice");
 let mut driver = rerun_livekit::control::Driver::acquire(&room_args).await?;
 loop {
     driver.send(my_command.to_bytes())?; // at a fixed rate, for example 30 Hz
@@ -276,11 +279,16 @@ Two examples show it working:
   Reduce them at the source, or give them `delivery = "guaranteed"`.
 - Data on the latest lane can be lost without any network loss.
   LiveKit keeps only the newest unsent frame of a data track, so a frame that waits behind a large one can be replaced by the next.
+- What is logged together travels on the latest lane as one frame, which is lost whole.
+  For an operator whose link is slower than the robot's, LiveKit drops frames that would wait more than 100 ms for it: at worst, those over about 125 KB on a 10 Mbit/s link.
+  A large message logged often, such as a dense point cloud, then takes the small ones logged with it down.
+  Give it a `max_hz`, or reduce it at the source.
 - `VideoStream` is forwarded as data on the guaranteed lane, not over a video track.
   A video track would need LiveKit to hand over received video undecoded ([rust-sdks#1515](https://github.com/livekit/rust-sdks/pull/1515)).
 - Images arrive decoded, so the operator's Viewer holds raw frames in memory, up to its memory limit.
-- Commands carry no timestamp.
-  A command that the network delays is followed when it arrives.
+- A command counts as lost when it arrives more than the watchdog timeout later than the fastest one of its lease.
+  When the driver's commands keep arriving late, the robot stops and drops the lease, and the driver learns that it lost it.
+  This needs no synchronized clocks, but it also happens when the driver's or the robot's clock jumps by more than the timeout during a lease.
 
 ## Latency
 
