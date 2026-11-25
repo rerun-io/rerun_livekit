@@ -62,6 +62,8 @@ It runs in [MuJoCo](https://mujoco.org), with the policy that [MuJoCo Playground
 The first run downloads the model and the policy.
 On Linux without a display, set `MUJOCO_GL=egl`.
 
+<img src="docs/viewer.webp" alt="The operator's Rerun Viewer while driving the simulated Go2: its front camera on the left, the robot and its lidar points in 3D on the right, and below them the commanded and measured forward velocity and turn rate.">
+
 To bridge your own app instead of [`mujoco_robot.py`](examples/mujoco_robot.py), log to `rerun+http://127.0.0.1:9876/proxy`, which is the default of `connect_grpc()`.
 Start it after `rerun-livekit robot`, or its first seconds of data are skipped as too old.
 
