@@ -441,8 +441,12 @@ async fn forward_commands(track: RemoteDataTrack, command_tx: mpsc::Sender<Recei
         }
     };
     while let Some(frame) = frames.next().await {
-        let Ok(command) = CommandMsg::decode(frame.payload()) else {
-            continue;
+        let command = match CommandMsg::decode(frame.payload()) {
+            Ok(command) => command,
+            Err(err) => {
+                log::warn!("Ignoring the commands of {sender}: {err}");
+                return;
+            }
         };
         // How late a command is cannot be told without the time it was sent.
         let Some(delay_ms) = frame.user_timestamp().and_then(delay_since) else {
