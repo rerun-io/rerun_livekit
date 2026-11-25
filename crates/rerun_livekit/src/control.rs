@@ -11,7 +11,7 @@
 //!   the lease, so a driver that crashed does not lock everyone else out.
 //! - A command that arrives more than the watchdog timeout later than the fastest one of its
 //!   lease counts as lost, so a link that starts holding commands back stops the robot
-//!   instead of steering it late.
+//!   instead of steering it late. The robot then drops the lease, which tells the driver.
 
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -85,6 +85,10 @@ struct Lease {
     /// cancels out the offset between the two clocks.
     min_delay_ms: Option<i64>,
 
+    /// Whether the holder's last command was refused for arriving late. If the robot stops
+    /// while it is, the lease is dropped, so that its driver learns of it.
+    is_late: bool,
+
     /// When the holder last proved it is there: by taking the lease or by a valid command.
     last_heard: Instant,
 }
@@ -136,6 +140,11 @@ impl Leases {
         }
         is_held
     }
+
+    /// Drops the lease if its holder's last command arrived late, and returns it.
+    fn drop_late(&mut self) -> Option<Lease> {
+        self.current.take_if(|lease| lease.is_late)
+    }
 }
 
 /// Joins the room and returns the command the robot should follow right now.
@@ -143,8 +152,9 @@ impl Leases {
 /// The value is `None`, and the robot must stop, whenever no driver holds the lease, or the
 /// holder's commands stopped arriving for `watchdog_timeout`, or the room is unreachable.
 /// A command that arrives more than `watchdog_timeout` later than the fastest one of its lease
-/// counts as lost. This needs no synchronized clocks, but if either clock jumps by more than
-/// that during a lease, the robot stops until the driver takes the lease again.
+/// counts as lost. When the holder's commands keep arriving late, the robot stops and drops
+/// the lease, and the driver gets [`Error::LeaseLost`]. That needs no synchronized clocks, and
+/// it also happens if either clock jumps by more than `watchdog_timeout` during a lease.
 /// It stays `None` for good once another robot joins the room as this one, which has room for
 /// one: the receiver then sees no more changes.
 pub fn receive_commands(
@@ -228,8 +238,21 @@ async fn receive_session(
             }
 
             () = async { tokio::time::sleep_until(stop_at.unwrap_or_else(Instant::now)).await }, if stop_at.is_some() => {
-                if current_tx.send_replace(None).is_some() {
-                    log::warn!("No command, or only late ones, for {watchdog_timeout:?}: stopping");
+                let mut has_stopped = false;
+                let mut late = None;
+                lease_tx.send_if_modified(|leases| {
+                    has_stopped = current_tx.send_replace(None).is_some();
+                    late = leases.drop_late();
+                    late.is_some()
+                });
+                if let Some(lease) = late {
+                    log::warn!(
+                        "The commands of {} arrived more than {watchdog_timeout:?} late, \
+                         stopping and dropping its lease",
+                        lease.holder
+                    );
+                } else if has_stopped {
+                    log::warn!("No command for {watchdog_timeout:?}, stopping");
                 }
             }
         }
@@ -263,14 +286,17 @@ fn accept(lease: &mut Option<Lease>, received: &Received, max_lateness: Duration
         command,
         delay_ms,
     } = received;
-    let max_lateness_ms = i64::try_from(max_lateness.as_millis()).unwrap_or(i64::MAX);
-    let is_valid = lease.holder == *sender
+    let is_current = lease.holder == *sender
         && lease.id == command.lease
-        && lease.last_seq.is_none_or(|last_seq| last_seq < command.seq)
-        && lease
-            .min_delay_ms
-            .is_none_or(|min_delay_ms| delay_ms.saturating_sub(min_delay_ms) <= max_lateness_ms);
-    if !is_valid {
+        && lease.last_seq.is_none_or(|last_seq| last_seq < command.seq);
+    if !is_current {
+        return None;
+    }
+    let max_lateness_ms = i64::try_from(max_lateness.as_millis()).unwrap_or(i64::MAX);
+    lease.is_late = lease
+        .min_delay_ms
+        .is_some_and(|min_delay_ms| max_lateness_ms < delay_ms.saturating_sub(min_delay_ms));
+    if lease.is_late {
         return None;
     }
     lease.last_seq = Some(command.seq);
@@ -335,6 +361,7 @@ fn register_lease_methods(
                         holder: caller.clone(),
                         last_seq: None,
                         min_delay_ms: None,
+                        is_late: false,
                         last_heard: Instant::now(),
                     });
                     // A new lease starts stopped, so that nothing of the previous one is
@@ -570,6 +597,7 @@ mod tests {
             holder: ParticipantIdentity("alice".to_owned()),
             last_seq: None,
             min_delay_ms: None,
+            is_late: false,
             last_heard: Instant::now(),
         }
     }
@@ -625,14 +653,37 @@ mod tests {
             !accept(&mut lease, received("alice", 1, 3, 5_400)),
             "beyond the limit"
         );
+        let is_late = |lease: &Option<Lease>| lease.as_ref().is_some_and(|lease| lease.is_late);
+        assert!(is_late(&lease));
+        accept(&mut lease, received("bob", 1, 4, 5_050));
+        assert!(
+            is_late(&lease),
+            "a command of another driver changes nothing"
+        );
+
         assert!(
             accept(&mut lease, received("alice", 1, 4, 5_020)),
             "faster than any before"
         );
+        assert!(!is_late(&lease));
         assert!(
             !accept(&mut lease, received("alice", 1, 5, 5_340)),
             "beyond the limit of the faster one"
         );
+    }
+
+    #[test]
+    fn only_a_late_lease_is_dropped() {
+        let mut leases = Leases::new();
+        leases.current = Some(lease_of_alice());
+        assert!(leases.drop_late().is_none());
+        assert!(leases.current.is_some());
+
+        if let Some(lease) = &mut leases.current {
+            lease.is_late = true;
+        }
+        assert!(leases.drop_late().is_some());
+        assert!(leases.current.is_none());
     }
 
     #[test]
@@ -662,6 +713,7 @@ mod tests {
             holder: alice.clone(),
             last_seq: None,
             min_delay_ms: None,
+            is_late: false,
             last_heard: Instant::now(),
         });
         leases.next_id += 1;

@@ -287,7 +287,8 @@ Two examples show it working:
   A video track would need LiveKit to hand over received video undecoded ([rust-sdks#1515](https://github.com/livekit/rust-sdks/pull/1515)).
 - Images arrive decoded, so the operator's Viewer holds raw frames in memory, up to its memory limit.
 - A command counts as lost when it arrives more than the watchdog timeout later than the fastest one of its lease.
-  This needs no synchronized clocks, but if the driver's or the robot's clock jumps by more than that during a lease, the robot stops until the driver takes the lease again.
+  When the driver's commands keep arriving late, the robot stops and drops the lease, and the driver learns that it lost it.
+  This needs no synchronized clocks, but it also happens when the driver's or the robot's clock jumps by more than the timeout during a lease.
 
 ## Latency
 
