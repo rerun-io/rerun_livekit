@@ -15,7 +15,8 @@ env:
 jobs:
   rust-check:
     name: Rust
-    runs-on: ubuntu-latest
+    # The first image whose Ubuntu packages clang 21.
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
@@ -29,8 +30,8 @@ jobs:
       # See https://github.com/livekit/rust-sdks#building-on-linux
       - name: Install packages (Linux)
         run: |
-          wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 21
-          sudo apt-get install -y libglib2.0-dev libclang-21-dev pkg-config
+          sudo apt-get update
+          sudo apt-get install -y clang-21 libclang-21-dev libglib2.0-dev pkg-config
           echo "CC=clang-21" >> "$GITHUB_ENV"
           echo "CXX=clang++-21" >> "$GITHUB_ENV"
 
