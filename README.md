@@ -2,10 +2,8 @@
 
 Bridge any [Rerun](https://rerun.io) stream through [LiveKit](https://livekit.com), for a network adaptive, low latency remote connection between the Rerun Viewer and your robot.
 
-Rerun streams over gRPC, which ensures delivery of every message in order, however long that takes.
-This is the correct transport for logging and visualizing served data.
-However, when teleoperating, low latency is the priority.
-This bridge forwards the gRPC stream over WebRTC instead.
+> [!WARNING]
+> Experimental. This is version 0.1, not yet on crates.io, and what travels between the robot and the operator may change between versions, so run the same version on both ends.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/bridge-dark.svg">
@@ -59,11 +57,9 @@ cargo run --release -- operator --viewer rerun+http://127.0.0.1:9877/proxy
 cargo run --release --example keyboard_teleop   # w/x, z/c and a/d to drive, space to stop, q to quit
 ```
 
-The Viewer shows a quadruped that walks where you steer it, what its front camera and its lidar see, and how closely it follows your commands.
-The robot is a [Unitree Go2](https://github.com/google-deepmind/mujoco_menagerie/tree/main/unitree_go2) in [MuJoCo](https://mujoco.org).
-It walks with the policy that [MuJoCo Playground](https://playground.mujoco.org) trained for the Unitree Go1, which has the same joint layout.
-One run of the robot is one episode, which ends when you stop it or it falls over.
-Its first run downloads the model and the policy.
+The Viewer shows a simulated [Unitree Go2](https://github.com/google-deepmind/mujoco_menagerie/tree/main/unitree_go2) that walks where you steer it, what its front camera and its lidar see, and how closely it follows your commands.
+It runs in [MuJoCo](https://mujoco.org), with the policy that [MuJoCo Playground](https://playground.mujoco.org) trained for the Go1, which has the same joint layout.
+The first run downloads the model and the policy.
 On Linux without a display, set `MUJOCO_GL=egl`.
 
 To bridge your own app instead of [`mujoco_robot.py`](examples/mujoco_robot.py), log to `rerun+http://127.0.0.1:9876/proxy`, which is the default of `connect_grpc()`.
@@ -92,12 +88,17 @@ export LIVEKIT_URL=ws://<robot>:7880                               # on the oper
 - `tailscale ping <robot>` should report a direct connection.
   A relayed one runs on TCP, which brings back the stalls that WebRTC avoids.
 
-Every command also takes `--url`, `--api-key`, `--api-secret` and `--room`.
-Each one makes its own access token from the key and secret, which let anyone join any room of the LiveKit project as anyone, so give them only to machines you would trust to drive the robot.
-A room holds one robot, and any number of operators.
-Give each robot its own room, and no `--name`: then a second robot in the same room pushes the first one out instead of mixing in.
-The robot that was pushed out exits with an error. Don't have a supervisor restart it on that error, or the two robots take turns pushing each other out.
 For a web Viewer on the operator side, run `rerun --serve-web` there and pass its proxy address as `--viewer`.
+
+## Rooms and credentials
+
+- Every command takes `--url`, `--api-key`, `--api-secret` and `--room`.
+- Each command makes its own access token from the key and secret.
+  They let anyone join any room of the LiveKit project as anyone, so give them only to machines you would trust to drive the robot.
+- A room holds one robot and any number of operators.
+  Give each robot its own room and no `--name`: a second robot in the same room then pushes the first one out instead of mixing in.
+- A robot that was pushed out exits with an error.
+  Don't have a supervisor restart it on that error, or the two robots take turns pushing each other out.
 
 ## How data travels
 
@@ -153,8 +154,7 @@ Video is lossy.
 To get images exactly as logged, run the robot side with `--video false`, or set `video = false` in a rule.
 With `--video false`, a rule with `video = true` turns video back on for its entities.
 
-Images that are not video travel on the latest lane, which drops messages over about 1.9 MB.
-That suits small or compressed images.
+Images that are not video travel on the latest lane, which suits small or compressed images (see [Limits](#limits)).
 
 ### Tune the video
 
@@ -186,24 +186,20 @@ rerun --save operator.rrd --port 9878
 cargo run --release -- operator --name recorder --plot-latency --viewer rerun+http://127.0.0.1:9878/proxy
 ```
 
+`--plot-latency` logs how late each message arrived, under `/livekit/latency_ms`.
+
 ### Both ends in one segment
 
 Both copies keep the same recording id, so they can be two layers of one segment in a Rerun catalog.
-They also keep the same entity paths, so registered as they are, the two copies of an entity merge into one and can no longer be told apart.
-[`register_episode.py`](examples/register_episode.py) registers the robot's file as the `robot` layer.
-From the operator's file it builds the `operator` layer, which holds what only the operator's end knows: the images that reached it, moved below `/operator`, and the latency plots.
-
-Stop the robot side and the operator side first.
-While the proxy is running on Rerun's default port, `rerun` sends what it is asked to open there, and no new Viewer starts.
+[`register_episode.py`](examples/register_episode.py) registers them that way, with the operator's images moved below `/operator`, next to the robot's.
+Stop the robot side and the operator side first, so that `rerun` opens what it prints in a new Viewer:
 
 ```sh
 rerun server                                         # a local catalog
 pixi run register-episode episode.rrd operator.rrd
 ```
 
-Open the address that `register-episode` prints to see the robot's camera next to the operator's view, above the latency of every frame.
-The operator's images keep the time the robot logged them at, so the two views show the same moment and the latency plot shows how much later the operator saw it.
-The local catalog keeps its datasets in memory, so register the episodes again after restarting it.
+The address it prints shows the robot's camera next to the operator's view, above the latency of every frame.
 
 ## Send commands to the robot
 
@@ -261,11 +257,7 @@ rerun-livekit robot --commands-to-udp 127.0.0.1:9870
 This sends the command the robot should follow right now to that address, about 30 times a second, as the bytes the driver sent.
 An empty datagram means stop.
 The receiver must also stop when datagrams stop arriving.
-
-Two examples show it working:
-
-- [`keyboard_teleop`](crates/rerun_livekit/examples/keyboard_teleop.rs) sends a forward speed, a speed to the left and a turn rate, as three little-endian `f32`.
-- [`mujoco_robot.py`](examples/mujoco_robot.py) reads them from UDP and walks that way.
+[`keyboard_teleop`](crates/rerun_livekit/examples/keyboard_teleop.rs) sends a forward speed, a speed to the left and a turn rate as three little-endian `f32`, which is what [`mujoco_robot.py`](examples/mujoco_robot.py) reads.
 
 ## Limits
 
@@ -274,25 +266,22 @@ Two examples show it working:
   `RGBA` and `BGRA` images come back opaque.
 - 16-bit, float, chroma-subsampled and depth images are not sent as video.
   They travel unchanged on the latest lane.
-- A message over about 1.9 MB is dropped from the latest lane, with a warning.
-  Raw images (a 1280x720 RGB image is 2.8 MB) and dense point clouds can be larger.
-  Reduce them at the source, or give them `delivery = "guaranteed"`.
-- Data on the latest lane can be lost without any network loss.
-  LiveKit keeps only the newest unsent frame of a data track, so a frame that waits behind a large one can be replaced by the next.
-- What is logged together travels on the latest lane as one frame, which is lost whole.
-  For an operator whose link is slower than the robot's, LiveKit drops frames that would wait more than 100 ms for it: at worst, those over about 125 KB on a 10 Mbit/s link.
-  A large message logged often, such as a dense point cloud, then takes the small ones logged with it down.
-  Give it a `max_hz`, or reduce it at the source.
+- The latest lane loses data even without network loss.
+  What is logged together travels as one frame, which is lost whole:
+  - A message over about 1.9 MB is dropped, with a warning.
+    Raw images (a 1280x720 RGB image is 2.8 MB) and dense point clouds can be larger.
+  - LiveKit keeps only the newest unsent frame, so a frame that waits behind a large one can be replaced by the next.
+  - For an operator whose link is slower than the robot's, LiveKit drops frames that would wait more than 100 ms: at worst, those over about 125 KB on a 10 Mbit/s link.
+    A large message logged often then takes the small ones logged with it down.
+
+  Reduce large messages at the source or give them a `max_hz`.
+  One that must arrive whatever its size can use `delivery = "guaranteed"`.
 - `VideoStream` is forwarded as data on the guaranteed lane, not over a video track.
   A video track would need LiveKit to hand over received video undecoded ([rust-sdks#1515](https://github.com/livekit/rust-sdks/pull/1515)).
 - Images arrive decoded, so the operator's Viewer holds raw frames in memory, up to its memory limit.
 - A command counts as lost when it arrives more than the watchdog timeout later than the fastest one of its lease.
   When the driver's commands keep arriving late, the robot stops and drops the lease, and the driver learns that it lost it.
   This needs no synchronized clocks, but it also happens when the driver's or the robot's clock jumps by more than the timeout during a lease.
-
-## Latency
-
-`rerun-livekit operator --plot-latency` logs latency under `/livekit/latency_ms`.
 
 ## License
 
