@@ -419,7 +419,8 @@ async fn forward_commands(track: RemoteDataTrack, command_tx: mpsc::Sender<Recei
         };
         // How late a command is cannot be told without the time it was sent.
         let Some(delay_ms) = frame.user_timestamp().and_then(delay_since) else {
-            continue;
+            log::warn!("Ignoring the commands of {sender}: they carry no time they were sent");
+            return;
         };
         let received = Received {
             sender: sender.clone(),
