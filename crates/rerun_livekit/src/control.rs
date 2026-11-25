@@ -313,9 +313,9 @@ fn register_lease_methods(
     current_tx: &watch::Sender<Option<Bytes>>,
 ) {
     local.register_rpc_method(ACQUIRE_METHOD.to_owned(), {
-        let lease_tx = lease_tx.clone();
+        let (lease_tx, current_tx) = (lease_tx.clone(), current_tx.clone());
         move |invocation| {
-            let lease_tx = lease_tx.clone();
+            let (lease_tx, current_tx) = (lease_tx.clone(), current_tx.clone());
             Box::pin(async move {
                 let caller = invocation.caller_identity;
                 // Decided and granted in one step, so that two drivers cannot both get it.
@@ -337,6 +337,9 @@ fn register_lease_methods(
                         min_delay_ms: None,
                         last_heard: Instant::now(),
                     });
+                    // A new lease starts stopped, so that nothing of the previous one is
+                    // followed under it.
+                    current_tx.send_replace(None);
                     granted = Ok(id);
                     true
                 });
