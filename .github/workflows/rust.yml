@@ -17,9 +17,9 @@ jobs:
     name: Rust
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
         with:
           components: rust-docs, clippy, rustfmt
           toolchain: 1.98
@@ -34,7 +34,7 @@ jobs:
           echo "CC=clang-21" >> "$GITHUB_ENV"
           echo "CXX=clang++-21" >> "$GITHUB_ENV"
 
-      - uses: prefix-dev/setup-pixi@v0.8.8
+      - uses: prefix-dev/setup-pixi@19eac09b398e3d0c747adc7921926a6d802df4da # v0.8.8
         with:
           pixi-version: v0.84.2
 
@@ -74,8 +74,8 @@ jobs:
     name: Check Rust dependencies (cargo-deny)
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v3
-    - uses: EmbarkStudios/cargo-deny-action@v2
+    - uses: actions/checkout@a37ce9120846195fa4ece8f58b268e6043cb2f26 # v3.7.0
+    - uses: EmbarkStudios/cargo-deny-action@81891abc19297b21343b15ef67dc61e4aea74fda # v2.1.4
       with:
         rust-version: "1.98"
         log-level: warn

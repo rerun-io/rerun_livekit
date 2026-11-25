@@ -77,7 +77,12 @@ pub struct RoomArgs {
     api_key: String,
 
     /// API secret. The default is the secret of `livekit-server --dev`.
-    #[arg(long, env = "LIVEKIT_API_SECRET", default_value = "secret")]
+    #[arg(
+        long,
+        env = "LIVEKIT_API_SECRET",
+        hide_env_values = true,
+        default_value = "secret"
+    )]
     api_secret: String,
 
     /// Room to join. One robot per room: the robot, its operators and its driver must use
