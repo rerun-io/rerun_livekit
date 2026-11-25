@@ -83,7 +83,7 @@ pub struct RoomArgs {
         hide_env_values = true,
         default_value = "secret"
     )]
-    api_secret: String,
+    api_secret: ApiSecret,
 
     /// Room to join. One robot per room: the robot, its operators and its driver must use
     /// the same one. A second robot without `--name` pushes the first one out.
@@ -106,6 +106,22 @@ fn random_name() -> String {
     format!("{:08x}", rand::random::<u32>())
 }
 
+/// A LiveKit API secret. It does not show in `Debug`, so that logging cannot leak it.
+#[derive(Clone)]
+struct ApiSecret(String);
+
+impl From<String> for ApiSecret {
+    fn from(secret: String) -> Self {
+        Self(secret)
+    }
+}
+
+impl std::fmt::Debug for ApiSecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ApiSecret(…)")
+    }
+}
+
 impl RoomArgs {
     /// A room on a LiveKit server, for code that does not take these from the command line.
     pub fn new(
@@ -117,7 +133,7 @@ impl RoomArgs {
         Self {
             url: url.into(),
             api_key: api_key.into(),
-            api_secret: api_secret.into(),
+            api_secret: ApiSecret(api_secret.into()),
             room: room.into(),
             name: None,
             random_name: random_name(),
@@ -159,7 +175,7 @@ impl RoomArgs {
             None => role.as_str().to_owned(),
         };
 
-        let token = AccessToken::with_api_key(api_key, api_secret)
+        let token = AccessToken::with_api_key(api_key, &api_secret.0)
             .with_identity(&identity)
             .with_attributes([(ROLE_ATTRIBUTE, role.as_str())])
             .with_grants(VideoGrants {
@@ -185,5 +201,18 @@ impl RoomArgs {
                 url: url.clone(),
                 source,
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn debug_leaves_out_the_secret() {
+        let room_args = RoomArgs::new("ws://localhost:7880", "key", "hunter2", "rerun");
+        let debug = format!("{room_args:?}");
+        assert!(debug.contains("key"), "{debug}");
+        assert!(!debug.contains("hunter2"), "{debug}");
     }
 }
