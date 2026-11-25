@@ -549,9 +549,10 @@ impl Driver {
         };
         // The time it is sent tells the robot whether it arrived late.
         let frame = DataTrackFrame::new(command.encode_to_vec()).with_user_timestamp_now();
-        // A full queue means the track is being published again after a reconnect, and the
-        // next command replaces this one. An unpublished track comes after the robot left or
-        // the room disconnected, which the next call reports.
+        // A full queue means the track is being published again after a reconnect, or LiveKit's
+        // pipeline fell behind, and the next command replaces this one either way. An
+        // unpublished track comes after the robot left or the room disconnected, which the next
+        // call reports.
         self.track.try_push(frame).ok();
         Ok(())
     }

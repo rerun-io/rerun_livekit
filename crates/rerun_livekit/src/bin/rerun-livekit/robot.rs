@@ -498,8 +498,8 @@ impl LatestLane {
         match self.track.try_push(DataTrackFrame::new(frame)) {
             Ok(()) => Ok(()),
             Err(err) => match err.reason() {
-                // The track is being published again after a reconnect. The next frame
-                // replaces this one anyway.
+                // The track is being published again after a reconnect, or LiveKit's pipeline
+                // fell behind. The next frame replaces this one either way.
                 PushFrameErrorReason::QueueFull => Ok(()),
                 PushFrameErrorReason::TrackUnpublished => {
                     anyhow::bail!("The latest-wins data track was unpublished")
