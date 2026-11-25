@@ -678,12 +678,19 @@ mod tests {
     fn only_a_late_lease_is_dropped() {
         let mut leases = Leases::new();
         leases.current = Some(lease_of_alice());
+        accept(
+            &mut leases.current,
+            &received("alice", 1, 1, 0),
+            MAX_LATENESS,
+        );
         assert!(leases.drop_late().is_none());
         assert!(leases.current.is_some());
 
-        if let Some(lease) = &mut leases.current {
-            lease.is_late = true;
-        }
+        accept(
+            &mut leases.current,
+            &received("alice", 1, 2, 1_000),
+            MAX_LATENESS,
+        );
         assert!(leases.drop_late().is_some());
         assert!(leases.current.is_none());
     }

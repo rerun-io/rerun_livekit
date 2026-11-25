@@ -32,7 +32,7 @@ use crate::wire::{LATEST_TRACK, LOG_TOPIC, LatestFrame};
 /// LiveKit's receiver gives up on a data track frame after 128 packets of at most 16 kB
 /// (the depacketizer and packetizer of `livekit-datatrack` 0.3.0). An operator whose link is
 /// slower than the robot's gets less: the server drops a frame that would wait more than
-/// 100 ms for it.
+/// 100 ms for it (`rtc.datachannel_data_track_target_latency` in its config).
 const MAX_LATEST_BYTES: usize = 1_900_000;
 
 /// The most messages to route before looking at anything else, so that an app that never
