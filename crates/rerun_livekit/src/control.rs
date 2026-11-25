@@ -93,6 +93,32 @@ struct Lease {
     last_heard: Instant,
 }
 
+impl Lease {
+    /// A lease granted to `holder` just now.
+    fn new(id: u64, holder: ParticipantIdentity) -> Self {
+        Self {
+            id,
+            holder,
+            last_seq: None,
+            min_delay_ms: None,
+            is_late: false,
+            last_heard: Instant::now(),
+        }
+    }
+}
+
+/// What the watchdog did when no command arrived in time.
+enum Stopped {
+    /// The robot was already stopped.
+    Nothing,
+
+    /// The holder's commands stopped arriving. It keeps the lease, so that it can resume.
+    Quiet,
+
+    /// The holder's commands arrived late, so it lost the lease.
+    Late(Lease),
+}
+
 /// A command as it reached the robot.
 struct Received {
     sender: ParticipantIdentity,
@@ -140,23 +166,20 @@ impl Leases {
         }
         is_held
     }
-
-    /// Drops the lease if its holder's last command arrived late, and returns it.
-    fn drop_late(&mut self) -> Option<Lease> {
-        self.current.take_if(|lease| lease.is_late)
-    }
 }
 
 /// Joins the room and returns the command the robot should follow right now.
 ///
 /// The value is `None`, and the robot must stop, whenever no driver holds the lease, or the
 /// holder's commands stopped arriving for `watchdog_timeout`, or the room is unreachable.
+///
 /// A command that arrives more than `watchdog_timeout` later than the fastest one of its lease
 /// counts as lost. When the holder's commands keep arriving late, the robot stops and drops
 /// the lease, and the driver gets [`Error::LeaseLost`]. That needs no synchronized clocks, and
 /// it also happens if either clock jumps by more than `watchdog_timeout` during a lease.
-/// It stays `None` for good once another robot joins the room as this one, which has room for
-/// one: the receiver then sees no more changes.
+///
+/// The value stays `None` for good once another robot joins the room as this one, which has
+/// room for one: the receiver then sees no more changes.
 pub fn receive_commands(
     room: RoomArgs,
     watchdog_timeout: Duration,
@@ -238,21 +261,19 @@ async fn receive_session(
             }
 
             () = async { tokio::time::sleep_until(stop_at.unwrap_or_else(Instant::now)).await }, if stop_at.is_some() => {
-                let mut has_stopped = false;
-                let mut late = None;
+                let mut stopped = Stopped::Nothing;
                 lease_tx.send_if_modified(|leases| {
-                    has_stopped = current_tx.send_replace(None).is_some();
-                    late = leases.drop_late();
-                    late.is_some()
+                    stopped = stop(leases, current_tx);
+                    matches!(stopped, Stopped::Late(_))
                 });
-                if let Some(lease) = late {
-                    log::warn!(
+                match stopped {
+                    Stopped::Nothing => {}
+                    Stopped::Quiet => log::warn!("No command for {watchdog_timeout:?}, stopping"),
+                    Stopped::Late(lease) => log::warn!(
                         "The commands of {} arrived more than {watchdog_timeout:?} late, \
                          stopping and dropping its lease",
                         lease.holder
-                    );
-                } else if has_stopped {
-                    log::warn!("No command for {watchdog_timeout:?}, stopping");
+                    ),
                 }
             }
         }
@@ -277,6 +298,19 @@ fn drop_lease(
     is_dropped
 }
 
+/// Stops the robot because no command arrived in time, and drops the lease if its holder's
+/// commands were arriving late.
+///
+/// Call it with the lease locked, as everything that changes the command the robot follows is.
+fn stop(leases: &mut Leases, current_tx: &watch::Sender<Option<Bytes>>) -> Stopped {
+    let was_moving = current_tx.send_replace(None).is_some();
+    match leases.current.take_if(|lease| lease.is_late) {
+        Some(lease) => Stopped::Late(lease),
+        None if was_moving => Stopped::Quiet,
+        None => Stopped::Nothing,
+    }
+}
+
 /// Returns the payload of a command if it comes from the lease holder, is newer than the last
 /// one, and arrived no more than `max_lateness` later than the fastest one of the lease.
 fn accept(lease: &mut Option<Lease>, received: &Received, max_lateness: Duration) -> Option<Bytes> {
@@ -286,10 +320,10 @@ fn accept(lease: &mut Option<Lease>, received: &Received, max_lateness: Duration
         command,
         delay_ms,
     } = received;
-    let is_current = lease.holder == *sender
+    let is_holders_next = lease.holder == *sender
         && lease.id == command.lease
         && lease.last_seq.is_none_or(|last_seq| last_seq < command.seq);
-    if !is_current {
+    if !is_holders_next {
         return None;
     }
     let max_lateness_ms = i64::try_from(max_lateness.as_millis()).unwrap_or(i64::MAX);
@@ -356,14 +390,7 @@ fn register_lease_methods(
                     }
                     let id = leases.next_id;
                     leases.next_id += 1;
-                    leases.current = Some(Lease {
-                        id,
-                        holder: caller.clone(),
-                        last_seq: None,
-                        min_delay_ms: None,
-                        is_late: false,
-                        last_heard: Instant::now(),
-                    });
+                    leases.current = Some(Lease::new(id, caller.clone()));
                     // A new lease starts stopped, so that nothing of the previous one is
                     // followed under it.
                     current_tx.send_replace(None);
@@ -594,14 +621,7 @@ mod tests {
     }
 
     fn lease_of_alice() -> Lease {
-        Lease {
-            id: 1,
-            holder: ParticipantIdentity("alice".to_owned()),
-            last_seq: None,
-            min_delay_ms: None,
-            is_late: false,
-            last_heard: Instant::now(),
-        }
+        Lease::new(1, ParticipantIdentity("alice".to_owned()))
     }
 
     #[test]
@@ -675,24 +695,31 @@ mod tests {
     }
 
     #[test]
-    fn only_a_late_lease_is_dropped() {
+    fn the_watchdog_drops_only_a_late_lease() {
         let mut leases = Leases::new();
         leases.current = Some(lease_of_alice());
-        accept(
-            &mut leases.current,
-            &received("alice", 1, 1, 0),
-            MAX_LATENESS,
-        );
-        assert!(leases.drop_late().is_none());
-        assert!(leases.current.is_some());
+        let (current_tx, _current_rx) = watch::channel(None);
+        let follow = |leases: &mut Leases, received: Received| {
+            if let Some(payload) = accept(&mut leases.current, &received, MAX_LATENESS) {
+                current_tx.send_replace(Some(payload));
+            }
+        };
 
-        accept(
-            &mut leases.current,
-            &received("alice", 1, 2, 1_000),
-            MAX_LATENESS,
+        follow(&mut leases, received("alice", 1, 1, 0));
+        assert!(matches!(stop(&mut leases, &current_tx), Stopped::Quiet));
+        assert!(
+            matches!(stop(&mut leases, &current_tx), Stopped::Nothing),
+            "already stopped"
         );
-        assert!(leases.drop_late().is_some());
-        assert!(leases.current.is_none());
+        assert!(leases.current.is_some(), "a quiet holder may resume");
+
+        follow(&mut leases, received("alice", 1, 2, 0));
+        follow(&mut leases, received("alice", 1, 3, 1_000));
+        assert!(matches!(stop(&mut leases, &current_tx), Stopped::Late(_)));
+        assert!(
+            is_lease_lost(&leases.announced_id().to_string(), 1),
+            "the late holder learns that it lost the lease"
+        );
     }
 
     #[test]
@@ -717,14 +744,7 @@ mod tests {
         assert_eq!(leases.announced_id(), next_id);
 
         let alice = ParticipantIdentity("alice".to_owned());
-        leases.current = Some(Lease {
-            id: next_id,
-            holder: alice.clone(),
-            last_seq: None,
-            min_delay_ms: None,
-            is_late: false,
-            last_heard: Instant::now(),
-        });
+        leases.current = Some(Lease::new(next_id, alice.clone()));
         leases.next_id += 1;
         assert_eq!(leases.announced_id(), next_id, "the current lease");
 
