@@ -69,8 +69,8 @@ mujoco = ">=3.5,<4" # `mj_multiRay` takes `normal` since 3.5.
 numpy = "*"
 onnxruntime = "*"
 pillow = "*"
-# TODO(isaac): 0.44. The MJCF importer is not in a release yet, so this is the build of
-# rerun-io/reality `888fdaf` (rerun-io/rerun `27af7f3`).
+# TODO(isaac): 0.44. The MJCF importer is not in a release yet, so this is a development
+# build of rerun-io/rerun `27af7f3`.
 rerun-sdk = { version = "==0.44.0a1+dev", index = "https://build.rerun.io/commit/888fdaf/simple", extras = ["catalog"] }
 
 [feature.examples.tasks]
